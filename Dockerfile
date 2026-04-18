@@ -1,12 +1,10 @@
-FROM python:3.11-bullseye
+# Official Microsoft image — Chromium already installed, nothing to download
+FROM mcr.microsoft.com/playwright/python:v1.50.0-jammy
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Chromium + all OS dependencies
-RUN playwright install chromium --with-deps
 
 COPY amadeus_ah.py .
 COPY amadeus_api.py .
