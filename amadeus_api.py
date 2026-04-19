@@ -89,7 +89,7 @@ async def _go_to_search(page) -> bool:
     Call this after login AND after each completed search so the browser
     is always pre-positioned at the search form.
     """
-    async def _form_visible(ms=5_000):
+    async def _form_visible(ms=3_000):
         try:
             tf = await _app_frame(page)
             await tf.wait_for_selector(SEARCH_INPUT, state="visible", timeout=ms)
@@ -97,34 +97,32 @@ async def _go_to_search(page) -> bool:
         except Exception:
             return False
 
-    # Already there?
-    if await _form_visible(3_000):
+    # Already there? (fast path after pre-positioning)
+    if await _form_visible(2_000):
         return True
 
-    # Method A: apps icon → Search menu item
+    # Method A: apps icon → Search tab
     try:
         await _wait_splash_gone(page)
         await dismiss_any_modal(page)
         await _click_apps_then_header(page, "search", "Search")
-        if await _form_visible(8_000):
-            print("  [✓] _go_to_search: form visible after apps+tab nav.")
+        if await _form_visible(5_000):
+            print("  [✓] _go_to_search: form visible after apps+tab.")
             return True
     except Exception as e:
         print(f"  [!] _go_to_search method A: {e}")
 
-    # Method B: goto HOME_URL, wait for splash, then apps+Search again
+    # Method B: goto HOME_URL then click Search tab
     try:
         print("  [→] _go_to_search: goto HOME_URL …")
-        await page.goto(HOME_URL, wait_until="networkidle", timeout=45_000)
+        await page.goto(HOME_URL, wait_until="networkidle", timeout=30_000)
         await _wait_splash_gone(page)
         await dismiss_any_modal(page)
-        if await _form_visible(4_000):
-            print("  [✓] _go_to_search: form visible after HOME_URL (default view).")
+        if await _form_visible(3_000):
             return True
-        # Search tab not default – click it
         await _click_apps_then_header(page, "search", "Search")
-        if await _form_visible(10_000):
-            print("  [✓] _go_to_search: form visible after HOME_URL + apps+tab.")
+        if await _form_visible(6_000):
+            print("  [✓] _go_to_search: form visible after HOME_URL + tab.")
             return True
     except Exception as e:
         print(f"  [!] _go_to_search method B: {e}")

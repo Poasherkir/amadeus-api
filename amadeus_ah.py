@@ -218,10 +218,10 @@ async def dismiss_any_modal(page: Page) -> None:
             if btn:
                 _info("Modal button found – clicking …")
                 try:
-                    await btn.click(timeout=5_000)
+                    await btn.click(timeout=2_000)
                 except Exception:
-                    await btn.click(force=True, timeout=5_000)
-                await asyncio.sleep(1.0)
+                    await btn.click(force=True, timeout=2_000)
+                await asyncio.sleep(0.5)
                 dismissed = True
                 _ok("Modal dismissed via button click.")
                 break
@@ -312,7 +312,7 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
     tf = await _app_frame(page)
     _info(f"App frame: {getattr(tf, 'url', 'main')}")
 
-    await tf.wait_for_selector("#tpl0_SEARCH_searchForm_flightNum_input", timeout=40_000)
+    await tf.wait_for_selector("#tpl0_SEARCH_searchForm_flightNum_input", timeout=15_000)
     await asyncio.sleep(0.5)
 
     # ── 1. Flight number ───────────────────────────────────────────────────────
@@ -431,7 +431,7 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
         _warn("Normal click on Search failed – using force=True")
         await search_btn.click(force=True)
 
-    await page.wait_for_load_state("networkidle", timeout=40_000)
+    await page.wait_for_load_state("networkidle", timeout=20_000)
     _ok("Search submitted.")
 
 
@@ -442,31 +442,14 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
     _info("Waiting for search results …")
     tf = await _app_frame(page)
 
-    # Wait for either a result row or the "no flights" message (retry once)
-    found_results = False
-    for attempt in range(2):
-        try:
-            await tf.wait_for_selector(
-                '#flightsearch_result0, :text("No flights matching")',
-                timeout=35_000,
-            )
-            found_results = True
-            break
-        except PWTimeout:
-            if attempt == 0:
-                _warn("Timeout waiting for results – retrying search click …")
-                # Re-click the Search button in case it wasn't submitted properly
-                try:
-                    s_btn = await tf.query_selector('span:text-is("Search")')
-                    if s_btn:
-                        await s_btn.click(force=True)
-                        await page.wait_for_load_state("networkidle", timeout=30_000)
-                except Exception:
-                    pass
-            else:
-                _warn("Timeout waiting for results (both attempts).")
-
-    if not found_results:
+    # Wait for either a result row or the "no flights" message
+    try:
+        await tf.wait_for_selector(
+            '#flightsearch_result0, :text("No flights matching")',
+            timeout=25_000,
+        )
+    except PWTimeout:
+        _warn("Timeout waiting for results.")
         return False
 
     await asyncio.sleep(0.5)
@@ -498,17 +481,16 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
 # (HeaderDOCUMENT / HeaderPASSENGER are always-visible tabs in the top bar,
 #  NOT items inside a hamburger dropdown)
 # ──────────────────────────────────────────────────────────────────────────────
-async def _wait_splash_gone(page: Page, timeout: int = 30_000) -> None:
+async def _wait_splash_gone(page: Page, timeout: int = 8_000) -> None:
     """Wait until the full-screen splash/loading overlay is gone."""
     tf = await _app_frame(page)
     try:
         await tf.wait_for_selector(
             "#splashScreenContainer", state="hidden", timeout=timeout
         )
-        _info("Splash screen gone.")
     except PWTimeout:
         pass   # If it never appeared that's fine too
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.3)
 
 
 async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
@@ -522,50 +504,45 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
     """
     await _wait_splash_gone(page)
 
-    # ── Step 1: click the apps icon (with retry) ──────────────────────────────
-    _info("Clicking apps icon (#applicationsLink) …")
+    # ── Step 1: click the apps icon ───────────────────────────────────────────
+    _info("Clicking apps icon …")
     apps_clicked = False
-    for attempt in range(3):
-        tf = await _app_frame(page)   # re-query frame each attempt
+    for attempt in range(2):           # max 2 attempts
+        tf = await _app_frame(page)
         for apps_sel in ["#applicationsLink", '[class*="amadeusIcon"]', ".amadeusIcon"]:
             try:
                 apps_btn = await tf.wait_for_selector(
-                    apps_sel, state="visible", timeout=6_000
+                    apps_sel, state="visible", timeout=3_000   # was 6 s
                 )
                 if not apps_btn:
                     continue
-                await apps_btn.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
                 try:
-                    await apps_btn.click(timeout=4_000)
+                    await apps_btn.click(timeout=3_000)
                 except Exception:
-                    await apps_btn.click(force=True, timeout=4_000)
-                _info(f"Apps icon clicked (attempt {attempt + 1}, sel={apps_sel})")
+                    await apps_btn.click(force=True, timeout=3_000)
                 apps_clicked = True
                 break
-            except Exception as e:
-                _warn(f"Apps click attempt {attempt + 1} via '{apps_sel}': {e}")
+            except Exception:
+                pass
         if apps_clicked:
             break
-        await asyncio.sleep(0.6)
+        await asyncio.sleep(0.4)
 
-    await asyncio.sleep(1.0)   # let header tabs become active / visible
+    await asyncio.sleep(0.5)   # was 1.0 s
 
     # ── Step 2: click the target header tab ───────────────────────────────────
     tf = await _app_frame(page)
     selectors = [
         f"#{btn_id}",
         f'[id*="{label.upper()}"]',
-        f'[id*="{label.lower()}"]',
         f'.headerButton:has-text("{label}")',
-        f'span.headerButton:text-is("{label}")',
         f'span:text-is("{label}")',
         f':text("{label}")',
     ]
     btn = None
     for sel in selectors:
         try:
-            btn = await tf.wait_for_selector(sel, state="visible", timeout=6_000)
+            btn = await tf.wait_for_selector(sel, state="visible", timeout=2_000)  # was 6 s
             if btn:
                 _info(f"Header tab found via: {sel}")
                 break
@@ -577,8 +554,8 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
         return
 
     await btn.click()
-    await page.wait_for_load_state("networkidle", timeout=40_000)
-    await asyncio.sleep(1.0)
+    await page.wait_for_load_state("networkidle", timeout=20_000)   # was 40 s
+    await asyncio.sleep(0.5)   # was 1.0 s
     _ok(f"'{label}' view opened.")
 
 
