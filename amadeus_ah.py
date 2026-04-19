@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-Amadeus Altéa DCS FM Mobile – Air Algérie Ground Operations
-=====================================================================
+Amadeus Altéa DCS FM Mobile – Air Algérie Ground Operations.
 Automates login, flight search, passenger data extraction, and
 final loadsheet retrieval using Playwright (Chromium).
-
-Requirements:
-    pip install playwright
-    playwright install chromium
 """
 
 import asyncio
@@ -19,9 +14,6 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright, Page, TimeoutError as PWTimeout
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Constants
-# ──────────────────────────────────────────────────────────────────────────────
 LOGIN_URL = (
     "https://www.accounts.mca.amadeus.com/LoginService/authorizeAngular"
     "?service=fm&client_id=1ASIHDFAH&response_mode=form_post"
@@ -39,9 +31,6 @@ _MONTHS = {
     7:"JUL",8:"AUG",9:"SEP",10:"OCT",11:"NOV",12:"DEC",
 }
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Terminal helpers
-# ──────────────────────────────────────────────────────────────────────────────
 def _banner(title: str, width: int = 64) -> None:
     print("\n" + "═" * width)
     print(f"  {title}")
@@ -57,9 +46,7 @@ def _today() -> str:
     return f"{d.day:02d}-{_MONTHS[d.month]}-{d.year}"
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Frame helper – always returns the afmgui iframe (or main page as fallback)
-# ──────────────────────────────────────────────────────────────────────────────
+# Returns the afmgui iframe, or the main page as fallback
 async def _app_frame(page: Page):
     for frame in page.frames:
         if "afmgui.si.amadeus.net" in frame.url:
@@ -73,9 +60,6 @@ async def _app_frame(page: Page):
     return page
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 1 – Login
-# ──────────────────────────────────────────────────────────────────────────────
 async def do_login(page: Page) -> None:
     _info("Navigating to login page …")
     await page.goto(LOGIN_URL, wait_until="load", timeout=90_000)
@@ -104,7 +88,7 @@ async def do_login(page: Page) -> None:
         await page.keyboard.press("Enter")
         _info("Submit via Enter key")
 
-    # ── Handle "Force Sign In" dialog if another session is active ────────────
+    # Handle "Force Sign In" dialog if another session is active
     try:
         force_btn = await page.wait_for_selector(
             '#fosi_forceSignInButton, button:has-text("Force Sign In")',
@@ -114,21 +98,14 @@ async def do_login(page: Page) -> None:
         await force_btn.click()
         _ok("Force Sign In clicked.")
     except PWTimeout:
-        pass   # No conflict dialog – normal login flow
+        pass
 
     await page.wait_for_load_state("load", timeout=60_000)
     _ok("Logged in.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 2 – Contact Details → Done
-# ──────────────────────────────────────────────────────────────────────────────
 async def handle_contact_details(page: Page) -> None:
-    """
-    Click Done on the Contact Details page.
-    The page can appear on the main document OR inside the app iframe,
-    so we check both.  Retries up to 3 times in case of a stale element.
-    """
+    """Click Done on the Contact Details page if it appears after login."""
     _info("Checking for Contact Details page …")
 
     DONE_SEL = (
@@ -141,7 +118,6 @@ async def handle_contact_details(page: Page) -> None:
 
     done_el = None
 
-    # Search the main page first, then the app iframe
     for ctx in [page, await _app_frame(page)]:
         try:
             done_el = await ctx.wait_for_selector(DONE_SEL, timeout=15_000)
@@ -155,7 +131,6 @@ async def handle_contact_details(page: Page) -> None:
         _info("No Contact Details page detected – continuing.")
         return
 
-    # Retry click up to 3 times (element can go stale during page transition)
     for attempt in range(3):
         try:
             await done_el.click()
@@ -166,7 +141,6 @@ async def handle_contact_details(page: Page) -> None:
         except Exception as e:
             _warn(f"Done click attempt {attempt + 1} failed: {e}")
             await asyncio.sleep(1)
-            # Re-query fresh element
             for ctx in [page, await _app_frame(page)]:
                 try:
                     done_el = await ctx.query_selector(DONE_SEL)
@@ -178,20 +152,8 @@ async def handle_contact_details(page: Page) -> None:
     _warn("Could not click Done – continuing anyway.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Modal / overlay dismissal – generic helper
-# ──────────────────────────────────────────────────────────────────────────────
 async def dismiss_any_modal(page: Page) -> None:
-    """
-    Dismiss any blocking Angular Bootstrap modal (ngb-modal-window) or
-    generic overlay that might intercept pointer events.
-
-    Strategy (in order):
-      1. Click any visible Done / Close / OK / Cancel button inside a modal
-      2. Press Escape
-      3. Click the modal backdrop
-      4. Force-remove the modal from the DOM via JS
-    """
+    """Dismiss any blocking Angular Bootstrap modal or overlay."""
     _info("Checking for blocking modals …")
 
     MODAL_BTN_SEL = (
@@ -210,9 +172,7 @@ async def dismiss_any_modal(page: Page) -> None:
 
     dismissed = False
 
-    # Check both main page and iframe
     for ctx in [page, await _app_frame(page)]:
-        # 1. Try clicking a button inside the modal
         try:
             btn = await ctx.query_selector(MODAL_BTN_SEL)
             if btn:
@@ -228,7 +188,6 @@ async def dismiss_any_modal(page: Page) -> None:
         except Exception:
             pass
 
-        # 2. Check if a modal exists at all
         try:
             modal = await ctx.query_selector("ngb-modal-window, .modal.show, .modal.d-block")
             if not modal:
@@ -237,14 +196,12 @@ async def dismiss_any_modal(page: Page) -> None:
             continue
 
         _warn("Modal detected but no button found – trying Escape …")
-        # 3. Escape key
         try:
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.8)
         except Exception:
             pass
 
-        # 4. Click backdrop
         try:
             backdrop = await ctx.query_selector("ngb-modal-backdrop, .modal-backdrop")
             if backdrop:
@@ -253,7 +210,6 @@ async def dismiss_any_modal(page: Page) -> None:
         except Exception:
             pass
 
-        # 5. Force-remove via JS
         try:
             removed = await ctx.evaluate("""() => {
                 let count = 0;
@@ -263,8 +219,7 @@ async def dismiss_any_modal(page: Page) -> None:
                         el.remove(); count++;
                     });
                 }
-                // Also remove the 'modal-open' class from body which locks scrolling
-                document.body.classList.remove('modal-open');
+                            document.body.classList.remove('modal-open');
                 document.body.style.removeProperty('overflow');
                 document.body.style.removeProperty('padding-right');
                 return count;
@@ -279,27 +234,17 @@ async def dismiss_any_modal(page: Page) -> None:
         _info("No blocking modal detected.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 4 – Fill search form and submit
-# ──────────────────────────────────────────────────────────────────────────────
 async def _set_field(tf, field_id: str, value: str) -> None:
-    """
-    Set an Altéa xWidget input reliably.
-    Strategy: click → select-all → delete → type char by char (triggers oninput).
-    No Tab, no blur — moving focus is done by clicking the next field.
-    """
+    """Set an Altéa xWidget input by clicking, clearing, then typing char by char to trigger oninput."""
     el = await tf.wait_for_selector(f"#{field_id}", timeout=8_000)
     await el.click()
     await asyncio.sleep(0.15)
-    # Clear existing content
     await el.press("Control+a")
     await el.press("Delete")
     await asyncio.sleep(0.1)
-    # Type character by character so oninput fires on each keystroke
     for ch in value:
         await el.press(ch)
         await asyncio.sleep(0.05)
-    # Read back to confirm
     actual = await el.get_attribute("value") or await el.input_value()
     if actual.upper() != value.upper():
         _warn(f"#{field_id} shows '{actual}' after typing '{value}' – retrying with fill()")
@@ -315,18 +260,12 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
     await tf.wait_for_selector("#tpl0_SEARCH_searchForm_flightNum_input", timeout=15_000)
     await asyncio.sleep(0.5)
 
-    # ── 1. Flight number ───────────────────────────────────────────────────────
     await _set_field(tf, "tpl0_SEARCH_searchForm_flightNum_input", flight_num)
     _info(f"Flight number set: {flight_num}")
 
-    # ── 2. Date – set via JS (avoids calendar popup) ──────────────────────────
-    # First try known IDs, then auto-detect any date input in the search form.
     _SET_DATE_JS = """([id, val]) => {
         const el = id ? document.getElementById(id)
                       : (() => {
-                            // Auto-detect: find any visible input whose id/name/
-                            // placeholder contains 'date', or whose current value
-                            // already looks like a date string.
                             for (const inp of document.querySelectorAll('input')) {
                                 const attr = (inp.id + inp.name + inp.placeholder).toLowerCase();
                                 if (attr.includes('date') || attr.includes('fecha') ||
@@ -340,7 +279,6 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
         const nativeSet = Object.getOwnPropertyDescriptor(
             window.HTMLInputElement.prototype, 'value').set;
         nativeSet.call(el, val);
-        // Fire every event Angular / xWidget might listen to
         ['input','change','keydown','keyup','blur'].forEach(t =>
             el.dispatchEvent(new Event(t, {bubbles: true}))
         );
@@ -364,17 +302,14 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
     if not date_set:
         _warn("Date field not found by any method – proceeding without date filter")
 
-    # ── 3. Departure port ──────────────────────────────────────────────────────
     await _set_field(tf, "tpl0_SEARCH_searchForm_departurePort_input", dep_port)
     _info(f"Departure port set: {dep_port}")
 
-    # ── 4. Click flight-number field to trigger global re-validation ───────────
     fn_el = await tf.query_selector("#tpl0_SEARCH_searchForm_flightNum_input")
     if fn_el:
         await fn_el.click()
-    await asyncio.sleep(0.8)   # let Angular validate & enable Search button
+    await asyncio.sleep(0.8)
 
-    # ── 5. Verify ALL field values; re-force any that got cleared ────────────────
     _FORCE_JS = """([id, val]) => {
         const el = document.getElementById(id);
         if (!el) return;
@@ -388,7 +323,6 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
 
     fn_val  = await tf.evaluate("() => document.getElementById('tpl0_SEARCH_searchForm_flightNum_input')?.value || ''")
     dep_val = await tf.evaluate("() => document.getElementById('tpl0_SEARCH_searchForm_departurePort_input')?.value || ''")
-    # Try to read date field (any of the known IDs)
     date_val = await tf.evaluate("""() => {
         const ids = ['tpl0_SEARCH_searchForm_flightDate_input',
                      'tpl0_SEARCH_searchForm_date_input',
@@ -423,7 +357,6 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
 
     _info(f"Searching AH{flight_num} / dep:{dep_port} / {date_str} …")
 
-    # ── 6. Click Search ────────────────────────────────────────────────────────
     search_btn = await tf.wait_for_selector('span:text-is("Search")', timeout=10_000)
     try:
         await search_btn.click(timeout=10_000)
@@ -435,14 +368,10 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
     _ok("Search submitted.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 5 – Click the matching flight row
-# ──────────────────────────────────────────────────────────────────────────────
 async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
     _info("Waiting for search results …")
     tf = await _app_frame(page)
 
-    # Wait for either a result row or the "no flights" message
     try:
         await tf.wait_for_selector(
             '#flightsearch_result0, :text("No flights matching")',
@@ -454,7 +383,6 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
 
     await asyncio.sleep(0.5)
 
-    # Check if result row exists
     row = await tf.query_selector("#flightsearch_result0")
     if not row:
         body = await tf.inner_text("body")
@@ -470,17 +398,11 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
     _info("Clicking flight row …")
     await row.click()
     await page.wait_for_load_state("load", timeout=40_000)
-    # Wait for any splash/loading screen to disappear before next step
     await _wait_splash_gone(page)
     _ok("Flight row clicked.")
     return True
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 6 – Navigate via header tab buttons
-# (HeaderDOCUMENT / HeaderPASSENGER are always-visible tabs in the top bar,
-#  NOT items inside a hamburger dropdown)
-# ──────────────────────────────────────────────────────────────────────────────
 async def _wait_splash_gone(page: Page, timeout: int = 8_000) -> None:
     """Wait until the full-screen splash/loading overlay is gone."""
     tf = await _app_frame(page)
@@ -489,30 +411,22 @@ async def _wait_splash_gone(page: Page, timeout: int = 8_000) -> None:
             "#splashScreenContainer", state="hidden", timeout=timeout
         )
     except PWTimeout:
-        pass   # If it never appeared that's fine too
+        pass
     await asyncio.sleep(0.3)
 
 
 async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
-    """
-    Altéa navigation flow:
-      1. Click #applicationsLink  (the apps / hamburger icon)
-      2. Click the target header tab  (e.g. #HeaderPASSENGER, #HeaderDOCUMENT)
-
-    The apps icon click is retried up to 3 times with force=True to handle
-    transient overlay / stale-element situations.
-    """
+    """Click the apps/hamburger icon then the target header tab (e.g. HeaderPASSENGER)."""
     await _wait_splash_gone(page)
 
-    # ── Step 1: click the apps icon ───────────────────────────────────────────
     _info("Clicking apps icon …")
     apps_clicked = False
-    for attempt in range(2):           # max 2 attempts
+    for attempt in range(2):
         tf = await _app_frame(page)
         for apps_sel in ["#applicationsLink", '[class*="amadeusIcon"]', ".amadeusIcon"]:
             try:
                 apps_btn = await tf.wait_for_selector(
-                    apps_sel, state="visible", timeout=3_000   # was 6 s
+                    apps_sel, state="visible", timeout=3_000
                 )
                 if not apps_btn:
                     continue
@@ -528,9 +442,8 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
             break
         await asyncio.sleep(0.4)
 
-    await asyncio.sleep(0.5)   # was 1.0 s
+    await asyncio.sleep(0.5)
 
-    # ── Step 2: click the target header tab ───────────────────────────────────
     tf = await _app_frame(page)
     selectors = [
         f"#{btn_id}",
@@ -554,18 +467,16 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
         return
 
     await btn.click()
-    await page.wait_for_load_state("load", timeout=20_000)   # was 40 s
-    await asyncio.sleep(0.5)   # was 1.0 s
+    await page.wait_for_load_state("load", timeout=20_000)
+    await asyncio.sleep(0.5)
     _ok(f"'{label}' view opened.")
 
 
 async def _find_refresh_btn(tf):
     """
-    Find the circular refresh button shown in the Passenger view.
-    Tries ID/class selectors first, then falls back to SVG path content detection.
-    Returns the element or None.
+    Find the circular refresh button in the Passenger view.
+    Falls back to SVG path content detection if CSS selectors don't match.
     """
-    # CSS-based attempts
     css_selectors = [
         "#refreshButton", "#reload", "#refresh",
         '[id*="refresh" i]', '[id*="reload" i]',
@@ -581,13 +492,10 @@ async def _find_refresh_btn(tf):
         except Exception:
             pass
 
-    # JS fallback: walk up from the SVG <path> whose d-attribute contains
-    # the distinctive fragment "14.133,28.265" (the refresh icon path)
     el = await tf.evaluate_handle("""() => {
         for (const path of document.querySelectorAll('path')) {
             const d = path.getAttribute('d') || '';
             if (d.includes('14.133') && d.includes('28.265')) {
-                // Walk up the DOM to find the nearest clickable ancestor
                 let node = path.parentElement;
                 while (node && node.tagName !== 'BODY') {
                     const tag = node.tagName.toLowerCase();
@@ -599,17 +507,14 @@ async def _find_refresh_btn(tf):
                     }
                     node = node.parentElement;
                 }
-                // Fallback: return the <svg> element itself
                 return path.closest('svg') || path.parentElement;
             }
         }
         return null;
     }""")
 
-    # evaluate_handle returns a JSHandle; check it's a real element
     try:
         if el and await el.evaluate("n => n !== null"):
-            # Convert JSHandle → ElementHandle via as_element()
             as_el = el.as_element()
             return as_el
     except Exception:
@@ -619,7 +524,6 @@ async def _find_refresh_btn(tf):
 
 async def open_passenger_view(page: Page) -> None:
     await _click_apps_then_header(page, "HeaderPASSENGER", "Passenger")
-    # Wait for a passenger-view specific element so we know we're actually there
     tf = await _app_frame(page)
     for pax_sel in [
         '#passengerView', '#paxView', '[id*="passenger" i]',
@@ -635,9 +539,6 @@ async def open_passenger_view(page: Page) -> None:
     await asyncio.sleep(1.0)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Output helpers
-# ──────────────────────────────────────────────────────────────────────────────
 OUTPUT_DIR = Path("C:/Users/n/Downloads/script/reports")
 
 def _ensure_output_dir() -> None:
@@ -650,9 +551,8 @@ def _report_path(flight_num: str, dep_port: str, date_str: str, suffix: str, ext
 
 async def _expand_for_print(page: Page) -> None:
     """
-    Remove overflow / height clipping from every element so that
-    CDP Page.printToPDF captures ALL content (scrollable areas included).
-    Runs JS both in the main page and inside the app iframe.
+    Remove overflow/height clipping from every element so CDP Page.printToPDF
+    captures all content including scrollable areas.
     """
     _EXPAND_JS = """() => {
         const SCROLL_VALS = ['scroll', 'auto', 'hidden'];
@@ -671,37 +571,28 @@ async def _expand_for_print(page: Page) -> None:
                 }
             } catch(_) {}
         }
-        // Also force the document root
         document.documentElement.style.setProperty('overflow',   'visible', 'important');
         document.documentElement.style.setProperty('height',     'auto',    'important');
         document.body.style.setProperty('overflow', 'visible', 'important');
         document.body.style.setProperty('height',   'auto',    'important');
-        // Scroll to bottom to trigger any lazy-loaded content, then back to top
         window.scrollTo(0, document.body.scrollHeight);
     }"""
 
-    # 1. Expand inside the app iframe first
     tf = await _app_frame(page)
     if tf is not page:
         await tf.evaluate(_EXPAND_JS)
         await asyncio.sleep(0.4)
-        # Scroll all the way to the bottom inside the frame, then top
         await tf.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
         await asyncio.sleep(0.3)
         await tf.evaluate("() => window.scrollTo(0, 0)")
         await asyncio.sleep(0.2)
 
-    # 2. Expand the main page and try to stretch the iframe element to full height
     await page.evaluate("""() => {
-        // Remove clipping on the main page
         document.documentElement.style.setProperty('overflow', 'visible', 'important');
         document.documentElement.style.setProperty('height',   'auto',    'important');
         document.body.style.setProperty('overflow', 'visible', 'important');
         document.body.style.setProperty('height',   'auto',    'important');
 
-        // Attempt to resize each iframe to its content height
-        // (will silently fail for cross-origin; that's fine — Chromium's PDF
-        //  renderer can still reach into same-process frames)
         document.querySelectorAll('iframe').forEach(iframe => {
             try {
                 const h = iframe.contentDocument?.documentElement?.scrollHeight
@@ -714,18 +605,12 @@ async def _expand_for_print(page: Page) -> None:
             } catch(_) {}
         });
     }""")
-    await asyncio.sleep(0.5)   # let the browser reflow
+    await asyncio.sleep(0.5)
 
 
 async def _save_pdf(page: Page, path: Path, *, wide: bool = False) -> None:
-    """
-    Save the current page as a PDF using Chromium's built-in print-to-PDF.
-    Works in both headless and headed mode via CDP.
-
-    `wide=True` uses landscape A4 — handy for wide monospaced loadsheets.
-    """
+    """Save the current page as PDF via CDP. wide=True uses A4 landscape."""
     try:
-        # Choose paper dimensions
         if wide:
             pw, ph = 11.69, 8.27   # A4 landscape
         else:
@@ -741,7 +626,7 @@ async def _save_pdf(page: Page, path: Path, *, wide: bool = False) -> None:
             "marginLeft":         0.4,
             "marginRight":        0.4,
             "scale":              0.85,
-            "preferCSSPageSize":  False,   # use our paper size, not CSS @page
+            "preferCSSPageSize":  False,
         })
         await cdp.detach()
         import base64
@@ -757,35 +642,28 @@ def _save_text(content: str, path: Path) -> None:
 
 
 def _save_loadsheet_pdf(text: str, path: Path) -> None:
-    """
-    Generate a PDF from the extracted loadsheet text using reportlab.
-
-    Output is identical to the .txt file — Courier 9 pt, black on white,
-    A4 landscape so wide columns are never wrapped.  No browser involved.
-    """
+    """Generate a PDF from extracted loadsheet text using reportlab (Courier 9pt, A4 landscape)."""
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.pdfgen import canvas as rl_canvas
 
-    PAGE_W, PAGE_H = landscape(A4)   # 841.9 × 595.3 pt  (≈ 297 × 210 mm)
-    MARGIN      = 28.3               # 10 mm in points
+    PAGE_W, PAGE_H = landscape(A4)
+    MARGIN      = 28.3
     FONT        = "Courier"
     FONT_SIZE   = 9
-    LINE_H      = FONT_SIZE * 1.25   # 11.25 pt leading
+    LINE_H      = FONT_SIZE * 1.25
 
     c = rl_canvas.Canvas(str(path), pagesize=landscape(A4))
     c.setFont(FONT, FONT_SIZE)
 
     x = MARGIN
-    y = PAGE_H - MARGIN   # start at top-left
+    y = PAGE_H - MARGIN
 
     for raw_line in text.splitlines():
-        # New page when we run out of vertical space
         if y < MARGIN + LINE_H:
             c.showPage()
             c.setFont(FONT, FONT_SIZE)
             y = PAGE_H - MARGIN
 
-        # Replace any characters that Courier cannot encode (keep ASCII safe)
         safe = raw_line.encode("latin-1", errors="replace").decode("latin-1")
         c.drawString(x, y, safe)
         y -= LINE_H
@@ -795,10 +673,7 @@ def _save_loadsheet_pdf(text: str, path: Path) -> None:
 
 
 async def _page_structured_text(page: Page) -> str:
-    """
-    Extract text from the page preserving visual structure:
-    table rows become pipe-separated lines, block elements become new lines.
-    """
+    """Extract page text preserving visual structure; table rows become pipe-separated lines."""
     tf = await _app_frame(page)
     text = await tf.evaluate("""() => {
         function walk(node, lines, indent) {
@@ -812,7 +687,6 @@ async def _page_structured_text(page: Page) -> str:
             const skip = ['script','style','noscript','svg','path','polygon','circle'];
             if (skip.includes(tag)) return;
 
-            // Table row → join cells with |
             if (tag === 'tr') {
                 const cells = [...node.querySelectorAll('td,th')].map(c =>
                     c.innerText.replace(/\\n/g,' ').trim()
@@ -820,7 +694,6 @@ async def _page_structured_text(page: Page) -> str:
                 lines.push(cells.join('  |  '));
                 return;
             }
-            // Block-level elements → newline before children
             const block = ['div','p','br','h1','h2','h3','h4','section',
                            'article','header','footer','table','thead','tbody'];
             if (tag === 'br') { lines.push(''); return; }
@@ -829,12 +702,10 @@ async def _page_structured_text(page: Page) -> str:
                 lines.push('');
                 return;
             }
-            // Inline – just recurse
             for (const child of node.childNodes) walk(child, lines, indent);
         }
         const lines = [];
         walk(document.body, lines, 0);
-        // Collapse 3+ blank lines to 1
         return lines
             .join('\\n')
             .replace(/\\n{3,}/g, '\\n\\n')
@@ -843,21 +714,14 @@ async def _page_structured_text(page: Page) -> str:
     return text
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 7 – Extract and display passenger information + save PDF & text
-# ──────────────────────────────────────────────────────────────────────────────
 async def extract_passenger_data(
     page: Page, flight_num: str, dep_port: str, date_str: str
 ) -> str:
     _banner("PASSENGER INFORMATION")
 
-    # Expand all scrollable containers so CDP captures the full passenger list
     await _expand_for_print(page)
-
-    # Structured text that mirrors the visual layout of the page
     text = await _page_structured_text(page)
 
-    # ── Strip login-page text if it leaked in as an overlay ──────────────────
     _LOGIN_MARKERS = (
         "Please enter your details to log in",
         "Login + Organization",
@@ -878,46 +742,32 @@ async def extract_passenger_data(
 
     text = _strip_login(text)
 
-    # ── Retry once if text is still empty (page may not have loaded yet) ──────
     if not text.strip():
         _warn("Passenger text empty – waiting 5 s and retrying extraction …")
         await asyncio.sleep(5)
         await _expand_for_print(page)
         text = _strip_login(await _page_structured_text(page))
 
-    # Print to terminal
     for line in text.splitlines():
         print(f"  {line}")
 
-    # Save text file
     _ensure_output_dir()
     txt_path = _report_path(flight_num, dep_port, date_str, "passenger", "txt")
     _save_text(text, txt_path)
 
-    # Save PDF (faithful visual copy via CDP print-to-PDF)
     pdf_path = _report_path(flight_num, dep_port, date_str, "passenger", "pdf")
     await _save_pdf(page, pdf_path)
 
     return text
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Step 8 – Final Loadsheet
-# Called only when the flight is confirmed CLOSED.
-# Flow: Documents tab → click Final Loadsheet → expand → extract → PDF + TXT
-# ──────────────────────────────────────────────────────────────────────────────
 async def get_final_loadsheet(
     page: Page, flight_num: str, dep_port: str, date_str: str,
 ) -> bool:
     """
     Navigate to Documents and look for the Final Loadsheet button.
-
-    Returns
-    -------
-    True  – loadsheet found, extracted, and saved as PDF + TXT.
-    False – button not present → flight is NOT closed yet.
+    Returns True if found and extracted, False if the flight is not closed yet.
     """
-    # ── 0. Reload to restore DOM (extract_passenger_data modifies overflow styles)
     _info("Reloading page before Documents navigation …")
     try:
         await page.reload(wait_until="load", timeout=20_000)
@@ -926,10 +776,8 @@ async def get_final_loadsheet(
     except Exception as e:
         _warn(f"Reload before Documents failed (non-fatal): {e}")
 
-    # ── 1. Click apps icon → Documents header tab ────────────────────────────
     await _click_apps_then_header(page, "HeaderDOCUMENT", "Documents")
 
-    # ── 2. Find the Final Loadsheet button in the document list ──────────────
     tf = await _app_frame(page)
     ls_btn = None
     for ls_sel in [
@@ -948,50 +796,33 @@ async def get_final_loadsheet(
             pass
 
     if not ls_btn:
-        # No loadsheet button → flight is not closed
         return False
 
-    # ── 3. Open the loadsheet ─────────────────────────────────────────────────
     _info("Opening Final Loadsheet …")
     await ls_btn.click()
     await page.wait_for_load_state("load", timeout=40_000)
-    await asyncio.sleep(2.0)   # let the document fully render
+    await asyncio.sleep(2.0)
 
-    # ── 4. Expand ALL scrollable containers before extracting / printing ───────
-    # The loadsheet spans multiple screen heights; overflow:hidden clips it.
-    # _expand_for_print() removes those constraints so CDP sees the full DOM.
     _info("Expanding page for full-content capture …")
     await _expand_for_print(page)
 
-    # ── 5. Extract full text and print to terminal ────────────────────────────
     text = await _page_structured_text(page)
     for line in text.splitlines():
         print(f"  {line}")
 
-    # ── 6. Save TXT + PDF ─────────────────────────────────────────────────────
     _ensure_output_dir()
     txt_path = _report_path(flight_num, dep_port, date_str, "loadsheet", "txt")
     pdf_path = _report_path(flight_num, dep_port, date_str, "loadsheet", "pdf")
     _save_text(text, txt_path)
-    # PDF built from extracted text via reportlab — Courier font, identical
-    # to the .txt file, NOT a screenshot of the webpage.
     _save_loadsheet_pdf(text, pdf_path)
     return True
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# LIVE PASSENGER MONITOR
-# ──────────────────────────────────────────────────────────────────────────────
 async def live_passenger_monitor(
     page: Page, flight_num: str, dep_port: str, date_str: str,
     interval: int = 15,
 ) -> None:
-    """
-    Stay on the Passenger view.
-    Every `interval` seconds (default 15) click the circular refresh button
-    to reload data from the server, then redisplay the updated passenger list.
-    Press Ctrl+C to stop.
-    """
+    """Refresh and redisplay the passenger list every `interval` seconds. Press Ctrl+C to stop."""
     print(
         f"\n  ┌─ LIVE MONITOR  AH{flight_num} {dep_port} {date_str} ──────────────────┐"
         f"\n  │  Refreshing every {interval}s via refresh button.                   │"
@@ -1005,7 +836,6 @@ async def live_passenger_monitor(
             iteration += 1
             tf = await _app_frame(page)
 
-            # ── Read current passenger data ───────────────────────────────────
             try:
                 text = await _page_structured_text(page)
             except Exception:
@@ -1014,7 +844,6 @@ async def live_passenger_monitor(
                 except Exception:
                     text = "(could not read passenger data)"
 
-            # ── Display in terminal ───────────────────────────────────────────
             os.system("cls" if os.name == "nt" else "clear")
             now = datetime.now().strftime("%H:%M:%S")
             print(
@@ -1027,11 +856,9 @@ async def live_passenger_monitor(
                     print(f"  {line}")
             print(f"\n  ─── next refresh in {interval}s ─── Ctrl+C to stop ───")
 
-            # ── Wait the interval in small chunks (keeps asyncio responsive) ──
             for _ in range(interval * 2):
                 await asyncio.sleep(0.5)
 
-            # ── Click the circular refresh button to reload passenger data ────
             tf = await _app_frame(page)
             refresh_btn = await _find_refresh_btn(tf)
             if refresh_btn:
@@ -1042,13 +869,11 @@ async def live_passenger_monitor(
                     _info(f"Refresh clicked  [{datetime.now().strftime('%H:%M:%S')}]")
                 except Exception as e:
                     _warn(f"Refresh button click failed: {e}")
-                    # Fallback: re-open Passenger via apps icon
                     try:
                         await _click_apps_then_header(page, "HeaderPASSENGER", "Passenger")
                     except Exception:
                         pass
             else:
-                # Refresh button not found – navigate back to Passenger
                 _warn("Refresh button not found – re-opening Passenger view …")
                 try:
                     await _click_apps_then_header(page, "HeaderPASSENGER", "Passenger")
@@ -1059,22 +884,12 @@ async def live_passenger_monitor(
         print("\n\n  [LIVE] Monitor stopped by user.")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Navigation back to search
-# ──────────────────────────────────────────────────────────────────────────────
 async def return_to_search(page: Page) -> None:
-    """
-    Go back to the flight search screen:
-      #applicationsLink  →  #search  (the Search header tab)
-    Same click pattern used everywhere else in Altéa.
-    """
+    """Navigate back to the flight search screen."""
     _info("Returning to search screen …")
     await _click_apps_then_header(page, "search", "Search")
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main
-# ──────────────────────────────────────────────────────────────────────────────
 async def run() -> None:
     _banner("Amadeus Altéa DCS FM Mobile  –  Air Algérie Ground Ops", 62)
 
@@ -1100,20 +915,15 @@ async def run() -> None:
         page = await ctx.new_page()
         page.set_default_timeout(30_000)
 
-        # Step 1 – Login
         await do_login(page)
-
-        # Step 2 – Contact Details
         await handle_contact_details(page)
 
-        # Flight loop
         first = True
         while True:
             if not first:
                 await return_to_search(page)
             first = False
 
-            # Step 3 – User input
             _banner("FLIGHT SEARCH", 40)
             flight_num = input("  Flight number  (e.g. 6007) : ").strip()
             dep_port   = input("  Departure IATA (e.g. AAE)  : ").strip().upper()
@@ -1121,21 +931,16 @@ async def run() -> None:
             raw_date   = input(f"  Date           [{today}] : ").strip()
 
             if not raw_date:
-                # Enter pressed → use today
                 date_str = today
             elif raw_date.isdigit() and 1 <= int(raw_date) <= 31:
-                # Only a day number typed (e.g. "17") → keep month + year from today
                 d = datetime.now()
                 date_str = f"{int(raw_date):02d}-{_MONTHS[d.month]}-{d.year}"
                 _info(f"Day-only input → {date_str}")
             else:
-                # Full date string typed
                 date_str = raw_date
 
-            # Step 4 – Fill form and search
             await do_search(page, flight_num, dep_port, date_str)
 
-            # Step 5 – Click flight row
             found = await select_flight_row(page, flight_num, dep_port)
             if not found:
                 again = input("\n  Search another flight? [Y/n]: ").strip().lower()
@@ -1143,27 +948,15 @@ async def run() -> None:
                     break
                 continue
 
-            # ── Check closed vs open: Documents → look for Final Loadsheet ──────
-            # If the Final Loadsheet button exists  → flight is CLOSED.
-            # If it does NOT exist                  → flight is still OPEN.
-            # This is the only reliable indicator — no guessing from page text.
             _info("Checking Documents for Final Loadsheet …")
             is_closed = await get_final_loadsheet(page, flight_num, dep_port, date_str)
 
             if is_closed:
-                # ══════════════════════════════════════════════════════════════
-                # CLOSED – loadsheet already extracted above.
-                # Now extract passenger data too.
-                # ══════════════════════════════════════════════════════════════
                 _ok("Flight is CLOSED ✓ — loadsheet saved, fetching passengers …")
                 await open_passenger_view(page)
                 await extract_passenger_data(page, flight_num, dep_port, date_str)
 
             else:
-                # ══════════════════════════════════════════════════════════════
-                # OPEN – no loadsheet yet.
-                # Go to Passenger view and start live monitor.
-                # ══════════════════════════════════════════════════════════════
                 _banner("FLIGHT STATUS")
                 print(
                     "\n  ✈  Final Loadsheet not found — flight is NOT CLOSED yet.\n"
@@ -1172,7 +965,6 @@ async def run() -> None:
                 await open_passenger_view(page)
                 await live_passenger_monitor(page, flight_num, dep_port, date_str, interval=15)
 
-            # ── Search another flight? ────────────────────────────────────────
             again = input("\n  Search another flight? [Y/n]: ").strip().lower()
             if again in ("n", "no"):
                 _ok("Exiting. Goodbye!")

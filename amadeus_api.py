@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
 Amadeus Altéa DCS FM Mobile – REST API Server
-==============================================
+
 Wraps amadeus_ah.py in a FastAPI server so any device on the same
-network (phone, tablet, another PC) can trigger searches via HTTP.
+network can trigger searches via HTTP.
 
 Start:
     python amadeus_api.py
 
-Then call from anywhere:
-    POST http://<your-ip>:8000/search
-    Body: { "flight_num": "6007", "dep_port": "AAE", "date": "18-APR-2026" }
-
-Endpoints
----------
-GET  /             – health check / status
-POST /search       – search a flight and return all data
-GET  /reports      – list saved report files
-GET  /reports/{fn} – download a saved report file
-POST /logout       – close browser session
+Endpoints:
+    GET  /             – health check
+    POST /search       – search a flight and return all data
+    GET  /reports      – list saved report files
+    GET  /reports/{fn} – download a saved report file
+    POST /login        – open browser session and login
+    POST /logout       – close browser session
 """
 
 import asyncio
@@ -33,14 +29,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
-# On Railway the filesystem is ephemeral — use /tmp so PDFs survive the request
-# On Windows (local) keep the original reports folder
 _IS_RAILWAY = os.environ.get("RAILWAY_ENVIRONMENT") is not None
 if _IS_RAILWAY:
     import amadeus_ah as _ah_module
     _ah_module.OUTPUT_DIR = Path("/tmp/reports")
 
-# ── Import everything from the main automation script ──────────────────────
 from amadeus_ah import (
     HOME_URL,
     OUTPUT_DIR,
@@ -67,23 +60,18 @@ from amadeus_ah import (
 )
 from playwright.async_api import async_playwright
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Shared browser state (one session for the lifetime of the server)
-# ──────────────────────────────────────────────────────────────────────────────
 _state: dict = {
     "playwright": None,
     "browser":    None,
     "page":       None,
     "logged_in":  False,
-    "lock":       None,   # asyncio.Lock – set in lifespan
+    "lock":       None,
 }
-
 
 SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
 
 
 async def _session_expired(page) -> bool:
-    """Return True if the page is showing the Amadeus login form."""
     try:
         url = page.url
         if "LoginService" in url or "login" in url.lower():
@@ -95,11 +83,7 @@ async def _session_expired(page) -> bool:
 
 
 async def _go_to_search(page) -> bool:
-    """
-    Navigate the browser to the flight-search form.
-    Always clicks apps→Search so Angular loads a fresh empty form.
-    Auto-relogs in if the session has expired.
-    """
+    """Navigate to the flight-search form. Auto-relogs in if the session expired."""
     async def _form_visible(ms=5_000):
         try:
             tf = await _app_frame(page)
@@ -111,7 +95,6 @@ async def _go_to_search(page) -> bool:
     await _wait_splash_gone(page)
     await dismiss_any_modal(page)
 
-    # Method A: apps icon → Search tab
     try:
         await _click_apps_then_header(page, "search", "Search")
         if await _form_visible(5_000):
@@ -120,7 +103,6 @@ async def _go_to_search(page) -> bool:
     except Exception as e:
         print(f"  [!] _go_to_search method A: {e}")
 
-    # Method B: goto HOME_URL then click Search tab
     try:
         print("  [→] _go_to_search: HOME_URL fallback …")
         await page.goto(HOME_URL, wait_until="load", timeout=30_000)
@@ -133,11 +115,10 @@ async def _go_to_search(page) -> bool:
     except Exception as e:
         print(f"  [!] _go_to_search method B: {e}")
 
-    # Method C: session expired → re-login automatically
     print("  [→] _go_to_search: session may have expired – re-logging in …")
     try:
         _state["logged_in"] = False
-        await _ensure_session()          # re-login with the current page
+        await _ensure_session()
         _state["logged_in"] = True
         if await _form_visible(8_000):
             print("  [✓] _go_to_search: form ready after re-login.")
@@ -151,7 +132,6 @@ async def _go_to_search(page) -> bool:
 
 async def _ensure_session() -> None:
     """Launch browser (if needed) and login."""
-    # If page already exists, reuse it (session expired – just re-login on same page)
     if _state["page"]:
         page = _state["page"]
         await do_login(page)
@@ -160,7 +140,6 @@ async def _ensure_session() -> None:
         _state["logged_in"] = True
         return
 
-    # First time: launch a fresh browser
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
         headless=True,
@@ -198,13 +177,8 @@ async def _close_session() -> None:
     _state["logged_in"]  = False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# App lifespan – yield immediately so Railway health-check passes,
-# then launch browser + login in the background.
-# ──────────────────────────────────────────────────────────────────────────────
 async def _warmup() -> None:
-    """Launch browser and login in the background after server is ready."""
-    await asyncio.sleep(3)   # give uvicorn a moment to bind the port
+    await asyncio.sleep(3)
     async with _state["lock"]:
         try:
             await _ensure_session()
@@ -217,9 +191,8 @@ async def _warmup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["lock"] = asyncio.Lock()
-    # Fire background login so startup returns immediately
     asyncio.create_task(_warmup())
-    yield                      # ← server accepts requests right away
+    yield
     await _close_session()
 
 
@@ -231,28 +204,22 @@ app = FastAPI(
 )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Request / Response models
-# ──────────────────────────────────────────────────────────────────────────────
 class FlightRequest(BaseModel):
     flight_num: str
     dep_port:   str
-    date:       Optional[str] = ""   # leave empty for today
+    date:       Optional[str] = ""
 
 
 class FlightResponse(BaseModel):
-    flight:       str
-    dep_port:     str
-    date:         str
-    closed:       bool
+    flight:        str
+    dep_port:      str
+    date:          str
+    closed:        bool
     passenger_txt: Optional[str] = None
     loadsheet_txt: Optional[str] = None
-    files:        list[str] = []
+    files:         list[str] = []
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helper – resolve date string
-# ──────────────────────────────────────────────────────────────────────────────
 def _resolve_date(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
@@ -264,9 +231,6 @@ def _resolve_date(raw: str) -> str:
     return raw
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Endpoints
-# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/", summary="Server status")
 async def root():
     local_ip = socket.gethostbyname(socket.gethostname())
@@ -282,17 +246,12 @@ async def root():
 async def search_flight(req: FlightRequest):
     """
     Search for a flight and extract all available data.
-
-    - If the Final Loadsheet is found → flight is CLOSED → returns loadsheet + passengers.
-    - If not found → flight is OPEN → returns current passenger data only.
-
-    Saved files are also written to the reports folder on the server.
+    Returns loadsheet + passengers if the flight is closed, or passenger data only if still open.
     """
-    # Fail fast if login hasn't completed yet (avoids Railway HTTP timeout)
     if not (_state["logged_in"] and _state["page"]):
         raise HTTPException(503, "Still logging in – server starts in ~90 s after deploy. Retry in 30 s.")
 
-    async with _state["lock"]:   # one search at a time
+    async with _state["lock"]:
         page = _state["page"]
         if not page:
             raise HTTPException(503, "Browser session not ready")
@@ -302,25 +261,20 @@ async def search_flight(req: FlightRequest):
         date_str   = _resolve_date(req.date)
 
         try:
-            # ── navigate to search form (pre-positioned after login & each search) ──
             if not await _go_to_search(page):
                 raise HTTPException(503, "Search form unreachable. Call POST /logout then POST /login, then retry.")
 
             await dismiss_any_modal(page)
 
-            # ── fill form & search ────────────────────────────────────────────
             await do_search(page, flight_num, dep_port, date_str)
 
-            # ── click result row ──────────────────────────────────────────────
             found = await select_flight_row(page, flight_num, dep_port)
             if not found:
                 raise HTTPException(404, f"No flight AH{flight_num}/{dep_port}/{date_str} found")
 
-            # ── passenger data FIRST (before Documents nav muddles the session) ─
             await open_passenger_view(page)
             pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
 
-            # ── check if closed (Final Loadsheet present?) ────────────────────
             is_closed = await get_final_loadsheet(page, flight_num, dep_port, date_str)
 
             loadsheet_txt = None
@@ -329,7 +283,6 @@ async def search_flight(req: FlightRequest):
                 if ls_path.exists():
                     loadsheet_txt = ls_path.read_text(encoding="utf-8")
 
-            # ── collect saved file names ──────────────────────────────────────
             _ensure_output_dir()
             files = [
                 f.name for f in OUTPUT_DIR.iterdir()
@@ -346,16 +299,15 @@ async def search_flight(req: FlightRequest):
                 files         = sorted(files),
             )
 
-            # ── pre-position back at search form for the NEXT request ──────────
             try:
                 await _go_to_search(page)
             except Exception:
-                pass   # non-fatal – next request will handle it
+                pass
 
             return result
 
         except HTTPException:
-            raise   # pass 404 / 503 through unchanged
+            raise
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
@@ -375,7 +327,6 @@ async def get_report(filename: str):
     path = OUTPUT_DIR / filename
     if not path.exists() or not path.is_file():
         raise HTTPException(404, f"File '{filename}' not found")
-    # Guard against path traversal
     if not str(path.resolve()).startswith(str(OUTPUT_DIR.resolve())):
         raise HTTPException(403, "Access denied")
     return FileResponse(str(path), filename=filename)
@@ -388,7 +339,7 @@ async def logout():
     return {"status": "logged out"}
 
 
-@app.post("/login", summary="Re-open browser session and login")
+@app.post("/login", summary="Open browser session and login")
 async def login():
     async with _state["lock"]:
         if _state["logged_in"]:
@@ -397,11 +348,7 @@ async def login():
     return {"status": "logged in"}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Railway injects $PORT; fall back to 8000 locally
     port = int(os.environ.get("PORT", 8000))
     try:
         local_ip = socket.gethostbyname(socket.gethostname())
