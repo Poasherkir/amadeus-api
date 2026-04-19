@@ -267,22 +267,36 @@ async def search_flight(req: FlightRequest):
                 except Exception as nav_err:
                     print(f"  [!] Tab navigation failed: {nav_err}")
 
-            # Strategy 3: reload the page (keeps cookies/session intact)
+            # Strategy 3: navigate directly to HOME_URL (cookies keep the session)
             if not search_form_visible:
-                print("  [→] Reloading page to reset to search view …")
+                print("  [→] Navigating to HOME_URL to reset to search view …")
                 try:
-                    await page.reload(wait_until="networkidle", timeout=60_000)
+                    await page.goto(HOME_URL, wait_until="networkidle", timeout=60_000)
                     await dismiss_any_modal(page)
-                    search_form_visible = await _search_form_visible(20_000)
+                    search_form_visible = await _search_form_visible(25_000)
                     if search_form_visible:
-                        print("  [✓] Search form visible after reload.")
+                        print("  [✓] Search form visible after HOME_URL navigation.")
                     else:
-                        print("  [!] Search form still not visible after reload.")
-                except Exception as reload_err:
-                    print(f"  [!] Reload failed: {reload_err}")
+                        print("  [!] Search form still not visible after HOME_URL nav.")
+                except Exception as goto_err:
+                    print(f"  [!] HOME_URL navigation failed: {goto_err}")
+
+            # Strategy 4: session may have expired → re-login and try again
+            if not search_form_visible:
+                print("  [→] All strategies failed – re-logging in …")
+                try:
+                    await _close_session()
+                    await _ensure_session()
+                    page = _state["page"]
+                    await dismiss_any_modal(page)
+                    search_form_visible = await _search_form_visible(30_000)
+                    if search_form_visible:
+                        print("  [✓] Search form visible after re-login.")
+                except Exception as relogin_err:
+                    print(f"  [!] Re-login failed: {relogin_err}")
 
             if not search_form_visible:
-                raise HTTPException(503, "Search form could not be reached – session may have expired. Call POST /logout then POST /login to reset.")
+                raise HTTPException(503, "Search form could not be reached after re-login. Try again in 30 s.")
 
             # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
