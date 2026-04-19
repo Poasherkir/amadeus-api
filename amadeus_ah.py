@@ -116,7 +116,7 @@ async def do_login(page: Page) -> None:
     except PWTimeout:
         pass   # No conflict dialog – normal login flow
 
-    await page.wait_for_load_state("networkidle", timeout=60_000)
+    await page.wait_for_load_state("load", timeout=60_000)
     _ok("Logged in.")
 
 
@@ -159,7 +159,7 @@ async def handle_contact_details(page: Page) -> None:
     for attempt in range(3):
         try:
             await done_el.click()
-            await page.wait_for_load_state("networkidle", timeout=30_000)
+            await page.wait_for_load_state("load", timeout=30_000)
             await asyncio.sleep(1.5)
             _ok("Done clicked.")
             return
@@ -431,7 +431,7 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
         _warn("Normal click on Search failed – using force=True")
         await search_btn.click(force=True)
 
-    await page.wait_for_load_state("networkidle", timeout=20_000)
+    await page.wait_for_load_state("load", timeout=20_000)
     _ok("Search submitted.")
 
 
@@ -469,7 +469,7 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
     _info(f"Found: {snippet}")
     _info("Clicking flight row …")
     await row.click()
-    await page.wait_for_load_state("networkidle", timeout=40_000)
+    await page.wait_for_load_state("load", timeout=40_000)
     # Wait for any splash/loading screen to disappear before next step
     await _wait_splash_gone(page)
     _ok("Flight row clicked.")
@@ -554,7 +554,7 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
         return
 
     await btn.click()
-    await page.wait_for_load_state("networkidle", timeout=20_000)   # was 40 s
+    await page.wait_for_load_state("load", timeout=20_000)   # was 40 s
     await asyncio.sleep(0.5)   # was 1.0 s
     _ok(f"'{label}' view opened.")
 
@@ -945,7 +945,7 @@ async def get_final_loadsheet(
     # ── 3. Open the loadsheet ─────────────────────────────────────────────────
     _info("Opening Final Loadsheet …")
     await ls_btn.click()
-    await page.wait_for_load_state("networkidle", timeout=40_000)
+    await page.wait_for_load_state("load", timeout=40_000)
     await asyncio.sleep(2.0)   # let the document fully render
 
     # ── 4. Expand ALL scrollable containers before extracting / printing ───────
@@ -1028,7 +1028,7 @@ async def live_passenger_monitor(
             if refresh_btn:
                 try:
                     await refresh_btn.click()
-                    await page.wait_for_load_state("networkidle", timeout=15_000)
+                    await page.wait_for_load_state("load", timeout=15_000)
                     await asyncio.sleep(0.8)
                     _info(f"Refresh clicked  [{datetime.now().strftime('%H:%M:%S')}]")
                 except Exception as e:

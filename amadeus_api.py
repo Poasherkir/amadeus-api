@@ -115,7 +115,7 @@ async def _go_to_search(page) -> bool:
     # Method B: goto HOME_URL then click Search tab
     try:
         print("  [→] _go_to_search: goto HOME_URL …")
-        await page.goto(HOME_URL, wait_until="networkidle", timeout=30_000)
+        await page.goto(HOME_URL, wait_until="load", timeout=30_000)
         await _wait_splash_gone(page)
         await dismiss_any_modal(page)
         if await _form_visible(3_000):
