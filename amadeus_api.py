@@ -120,18 +120,27 @@ async def _close_session() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# App lifespan – start browser on boot, close on shutdown
+# App lifespan – yield immediately so Railway health-check passes,
+# then launch browser + login in the background.
 # ──────────────────────────────────────────────────────────────────────────────
+async def _warmup() -> None:
+    """Launch browser and login in the background after server is ready."""
+    await asyncio.sleep(3)   # give uvicorn a moment to bind the port
+    async with _state["lock"]:
+        try:
+            await _ensure_session()
+            print("  [✓] Background login complete.")
+        except Exception:
+            import traceback
+            print(f"WARMUP ERROR – browser/login failed:\n{traceback.format_exc()}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["lock"] = asyncio.Lock()
-    try:
-        await _ensure_session()
-    except Exception as exc:
-        import traceback
-        print(f"STARTUP ERROR – browser/login failed:\n{traceback.format_exc()}")
-        # Server still starts; /search will return 503 until /login is called
-    yield
+    # Fire background login so startup returns immediately
+    asyncio.create_task(_warmup())
+    yield                      # ← server accepts requests right away
     await _close_session()
 
 
@@ -200,6 +209,16 @@ async def search_flight(req: FlightRequest):
 
     Saved files are also written to the reports folder on the server.
     """
+    # Wait up to 120 s for background login to finish before giving up
+    for _wait in range(24):
+        if _state["logged_in"] and _state["page"]:
+            break
+        if _wait == 0:
+            print("  [→] Waiting for background login to complete …")
+        await asyncio.sleep(5)
+    else:
+        raise HTTPException(503, "Browser session not ready – login still in progress, retry in 30 s")
+
     async with _state["lock"]:   # one search at a time
         page = _state["page"]
         if not page:
