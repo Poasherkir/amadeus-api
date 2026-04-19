@@ -42,6 +42,7 @@ if _IS_RAILWAY:
 
 # ── Import everything from the main automation script ──────────────────────
 from amadeus_ah import (
+    HOME_URL,
     OUTPUT_DIR,
     _app_frame,
     _click_apps_then_header,
@@ -232,11 +233,38 @@ async def search_flight(req: FlightRequest):
             # ── dismiss any blocking modal before touching the UI ─────────────
             await dismiss_any_modal(page)
 
-            # ── navigate back to search ───────────────────────────────────────
+            # ── navigate to search view ───────────────────────────────────────
+            # Try the header-tab approach first; if the search form doesn't
+            # appear within 8 s, fall back to loading HOME_URL directly.
+            tf = await _app_frame(page)
+            search_form_visible = False
+
             try:
                 await _click_apps_then_header(page, "search", "Search")
+                tf = await _app_frame(page)
+                await tf.wait_for_selector(
+                    "#tpl0_SEARCH_searchForm_flightNum_input",
+                    state="visible", timeout=8_000,
+                )
+                search_form_visible = True
+                print("  [→] Search form visible after tab navigation.")
             except Exception as nav_err:
-                print(f"  [!] Nav to search failed (non-fatal): {nav_err}")
+                print(f"  [!] Tab navigation failed ({nav_err}) – falling back to HOME_URL")
+
+            if not search_form_visible:
+                # Hard navigate to the home URL which always shows the search form
+                try:
+                    await page.goto(HOME_URL, wait_until="networkidle", timeout=60_000)
+                    await dismiss_any_modal(page)
+                    tf = await _app_frame(page)
+                    await tf.wait_for_selector(
+                        "#tpl0_SEARCH_searchForm_flightNum_input",
+                        state="visible", timeout=20_000,
+                    )
+                    search_form_visible = True
+                    print("  [✓] Search form visible after HOME_URL navigation.")
+                except Exception as goto_err:
+                    print(f"  [!] HOME_URL navigation also failed: {goto_err}")
 
             # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
