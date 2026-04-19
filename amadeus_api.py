@@ -234,37 +234,55 @@ async def search_flight(req: FlightRequest):
             await dismiss_any_modal(page)
 
             # ── navigate to search view ───────────────────────────────────────
-            # Try the header-tab approach first; if the search form doesn't
-            # appear within 8 s, fall back to loading HOME_URL directly.
-            tf = await _app_frame(page)
+            # We try three strategies in order, stopping as soon as the search
+            # form becomes visible.  We NEVER do page.goto(HOME_URL) because
+            # that destroys the form-post SSO session.
+            SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
             search_form_visible = False
 
-            try:
-                await _click_apps_then_header(page, "search", "Search")
-                tf = await _app_frame(page)
-                await tf.wait_for_selector(
-                    "#tpl0_SEARCH_searchForm_flightNum_input",
-                    state="visible", timeout=8_000,
-                )
+            async def _search_form_visible(timeout_ms=6_000) -> bool:
+                try:
+                    tf2 = await _app_frame(page)
+                    await tf2.wait_for_selector(
+                        SEARCH_INPUT, state="visible", timeout=timeout_ms
+                    )
+                    return True
+                except Exception:
+                    return False
+
+            # Strategy 1: maybe the form is already on screen (e.g. first call)
+            if await _search_form_visible(4_000):
                 search_form_visible = True
-                print("  [→] Search form visible after tab navigation.")
-            except Exception as nav_err:
-                print(f"  [!] Tab navigation failed ({nav_err}) – falling back to HOME_URL")
+                print("  [→] Search form already visible – no navigation needed.")
+
+            # Strategy 2: click apps icon → Search tab
+            if not search_form_visible:
+                try:
+                    await _click_apps_then_header(page, "search", "Search")
+                    search_form_visible = await _search_form_visible(8_000)
+                    if search_form_visible:
+                        print("  [✓] Search form visible after tab navigation.")
+                    else:
+                        print("  [!] Tab navigation ran but form still not visible.")
+                except Exception as nav_err:
+                    print(f"  [!] Tab navigation failed: {nav_err}")
+
+            # Strategy 3: reload the page (keeps cookies/session intact)
+            if not search_form_visible:
+                print("  [→] Reloading page to reset to search view …")
+                try:
+                    await page.reload(wait_until="networkidle", timeout=60_000)
+                    await dismiss_any_modal(page)
+                    search_form_visible = await _search_form_visible(20_000)
+                    if search_form_visible:
+                        print("  [✓] Search form visible after reload.")
+                    else:
+                        print("  [!] Search form still not visible after reload.")
+                except Exception as reload_err:
+                    print(f"  [!] Reload failed: {reload_err}")
 
             if not search_form_visible:
-                # Hard navigate to the home URL which always shows the search form
-                try:
-                    await page.goto(HOME_URL, wait_until="networkidle", timeout=60_000)
-                    await dismiss_any_modal(page)
-                    tf = await _app_frame(page)
-                    await tf.wait_for_selector(
-                        "#tpl0_SEARCH_searchForm_flightNum_input",
-                        state="visible", timeout=20_000,
-                    )
-                    search_form_visible = True
-                    print("  [✓] Search form visible after HOME_URL navigation.")
-                except Exception as goto_err:
-                    print(f"  [!] HOME_URL navigation also failed: {goto_err}")
+                raise HTTPException(503, "Search form could not be reached – session may have expired. Call POST /logout then POST /login to reset.")
 
             # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
