@@ -838,24 +838,32 @@ async def extract_passenger_data(
     text = await _page_structured_text(page)
 
     # ── Strip login-page text if it leaked in as an overlay ──────────────────
-    # This happens when the app frame wasn't found and the main page (login)
-    # was captured instead.  Detect by well-known login-page phrases.
     _LOGIN_MARKERS = (
         "Please enter your details to log in",
         "Login + Organization",
         "Forgot your password",
         "Amadeus Copyright 1999",
     )
-    if any(m in text for m in _LOGIN_MARKERS):
+
+    def _strip_login(raw: str) -> str:
+        if not any(m in raw for m in _LOGIN_MARKERS):
+            return raw
         _warn("Login page text detected in passenger output – stripping …")
-        # Keep only lines that come AFTER the last login-page marker
-        lines = text.splitlines()
+        lines = raw.splitlines()
         last_login_line = -1
         for i, line in enumerate(lines):
             if any(m in line for m in _LOGIN_MARKERS):
                 last_login_line = i
-        if last_login_line >= 0:
-            text = "\n".join(lines[last_login_line + 1:]).strip()
+        return "\n".join(lines[last_login_line + 1:]).strip() if last_login_line >= 0 else raw
+
+    text = _strip_login(text)
+
+    # ── Retry once if text is still empty (page may not have loaded yet) ──────
+    if not text.strip():
+        _warn("Passenger text empty – waiting 5 s and retrying extraction …")
+        await asyncio.sleep(5)
+        await _expand_for_print(page)
+        text = _strip_login(await _page_structured_text(page))
 
     # Print to terminal
     for line in text.splitlines():

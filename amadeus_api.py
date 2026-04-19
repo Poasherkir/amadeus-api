@@ -295,6 +295,10 @@ async def search_flight(req: FlightRequest):
             if not found:
                 raise HTTPException(404, f"No flight AH{flight_num}/{dep_port}/{date_str} found")
 
+            # ── passenger data FIRST (before Documents nav muddles the session) ─
+            await open_passenger_view(page)
+            pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
+
             # ── check if closed (Final Loadsheet present?) ────────────────────
             is_closed = await get_final_loadsheet(page, flight_num, dep_port, date_str)
 
@@ -303,10 +307,6 @@ async def search_flight(req: FlightRequest):
                 ls_path = _report_path(flight_num, dep_port, date_str, "loadsheet", "txt")
                 if ls_path.exists():
                     loadsheet_txt = ls_path.read_text(encoding="utf-8")
-
-            # ── passenger data ────────────────────────────────────────────────
-            await open_passenger_view(page)
-            pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
 
             # ── collect saved file names ──────────────────────────────────────
             _ensure_output_dir()
