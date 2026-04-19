@@ -542,7 +542,7 @@ async def _click_apps_then_header(page: Page, btn_id: str, label: str) -> None:
     btn = None
     for sel in selectors:
         try:
-            btn = await tf.wait_for_selector(sel, state="visible", timeout=2_000)  # was 6 s
+            btn = await tf.wait_for_selector(sel, state="visible", timeout=3_000)
             if btn:
                 _info(f"Header tab found via: {sel}")
                 break
@@ -917,6 +917,15 @@ async def get_final_loadsheet(
     True  – loadsheet found, extracted, and saved as PDF + TXT.
     False – button not present → flight is NOT closed yet.
     """
+    # ── 0. Reload to restore DOM (extract_passenger_data modifies overflow styles)
+    _info("Reloading page before Documents navigation …")
+    try:
+        await page.reload(wait_until="load", timeout=20_000)
+        await _wait_splash_gone(page)
+        await asyncio.sleep(0.5)
+    except Exception as e:
+        _warn(f"Reload before Documents failed (non-fatal): {e}")
+
     # ── 1. Click apps icon → Documents header tab ────────────────────────────
     await _click_apps_then_header(page, "HeaderDOCUMENT", "Documents")
 
