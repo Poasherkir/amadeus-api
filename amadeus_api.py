@@ -97,35 +97,31 @@ async def _go_to_search(page) -> bool:
         except Exception:
             return False
 
-    # Already there? (fast path after pre-positioning)
-    if await _form_visible(2_000):
-        return True
-
-    # Method A: apps icon → Search tab
+    # Always navigate via apps→Search tab so Angular loads a FRESH empty form.
+    # Skipping this (fast path) causes Angular to keep stale results from the
+    # previous search, making the next search return 404.
+    await _wait_splash_gone(page)
+    await dismiss_any_modal(page)
     try:
-        await _wait_splash_gone(page)
-        await dismiss_any_modal(page)
         await _click_apps_then_header(page, "search", "Search")
         if await _form_visible(5_000):
-            print("  [✓] _go_to_search: form visible after apps+tab.")
+            print("  [✓] _go_to_search: fresh search form via apps+tab.")
             return True
     except Exception as e:
-        print(f"  [!] _go_to_search method A: {e}")
+        print(f"  [!] _go_to_search method A failed: {e}")
 
-    # Method B: goto HOME_URL then click Search tab
+    # Fallback: goto HOME_URL then click Search tab
     try:
-        print("  [→] _go_to_search: goto HOME_URL …")
+        print("  [→] _go_to_search: falling back to HOME_URL …")
         await page.goto(HOME_URL, wait_until="load", timeout=30_000)
         await _wait_splash_gone(page)
         await dismiss_any_modal(page)
-        if await _form_visible(3_000):
-            return True
         await _click_apps_then_header(page, "search", "Search")
         if await _form_visible(6_000):
             print("  [✓] _go_to_search: form visible after HOME_URL + tab.")
             return True
     except Exception as e:
-        print(f"  [!] _go_to_search method B: {e}")
+        print(f"  [!] _go_to_search method B failed: {e}")
 
     print("  [!] _go_to_search: all methods failed.")
     return False
