@@ -54,6 +54,7 @@ from amadeus_ah import (
     _save_text,
     _today,
     _MONTHS,
+    _wait_splash_gone,
     dismiss_any_modal,
     do_login,
     do_search,
@@ -76,6 +77,60 @@ _state: dict = {
     "logged_in":  False,
     "lock":       None,   # asyncio.Lock – set in lifespan
 }
+
+
+SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
+
+
+async def _go_to_search(page) -> bool:
+    """
+    Navigate the browser to the flight-search form.
+    Tries up to 3 methods; returns True if the form becomes visible.
+    Call this after login AND after each completed search so the browser
+    is always pre-positioned at the search form.
+    """
+    async def _form_visible(ms=5_000):
+        try:
+            tf = await _app_frame(page)
+            await tf.wait_for_selector(SEARCH_INPUT, state="visible", timeout=ms)
+            return True
+        except Exception:
+            return False
+
+    # Already there?
+    if await _form_visible(3_000):
+        return True
+
+    # Method A: apps icon → Search menu item
+    try:
+        await _wait_splash_gone(page)
+        await dismiss_any_modal(page)
+        await _click_apps_then_header(page, "search", "Search")
+        if await _form_visible(8_000):
+            print("  [✓] _go_to_search: form visible after apps+tab nav.")
+            return True
+    except Exception as e:
+        print(f"  [!] _go_to_search method A: {e}")
+
+    # Method B: goto HOME_URL, wait for splash, then apps+Search again
+    try:
+        print("  [→] _go_to_search: goto HOME_URL …")
+        await page.goto(HOME_URL, wait_until="networkidle", timeout=45_000)
+        await _wait_splash_gone(page)
+        await dismiss_any_modal(page)
+        if await _form_visible(4_000):
+            print("  [✓] _go_to_search: form visible after HOME_URL (default view).")
+            return True
+        # Search tab not default – click it
+        await _click_apps_then_header(page, "search", "Search")
+        if await _form_visible(10_000):
+            print("  [✓] _go_to_search: form visible after HOME_URL + apps+tab.")
+            return True
+    except Exception as e:
+        print(f"  [!] _go_to_search method B: {e}")
+
+    print("  [!] _go_to_search: all methods failed.")
+    return False
 
 
 async def _ensure_session() -> None:
@@ -101,7 +156,9 @@ async def _ensure_session() -> None:
 
     await do_login(page)
     await handle_contact_details(page)
-    await dismiss_any_modal(page)   # clear any leftover overlay before first search
+    await dismiss_any_modal(page)
+    # Pre-position at search form so the first /search call finds it immediately
+    await _go_to_search(page)
 
     _state["playwright"] = pw
     _state["browser"]    = browser
@@ -224,92 +281,10 @@ async def search_flight(req: FlightRequest):
         date_str   = _resolve_date(req.date)
 
         try:
-            # ── dismiss any blocking modal before touching the UI ─────────────
-            await dismiss_any_modal(page)
-
-            # ── navigate to search view ───────────────────────────────────────
-            # We try three strategies in order, stopping as soon as the search
-            # form becomes visible.  We NEVER do page.goto(HOME_URL) because
-            # that destroys the form-post SSO session.
-            SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
-            search_form_visible = False
-
-            async def _search_form_visible(timeout_ms=6_000) -> bool:
-                try:
-                    tf2 = await _app_frame(page)
-                    await tf2.wait_for_selector(
-                        SEARCH_INPUT, state="visible", timeout=timeout_ms
-                    )
-                    return True
-                except Exception:
-                    return False
-
-            # Helper: try every known selector for the Search tab/button
-            async def _click_search_tab() -> bool:
-                tf2 = await _app_frame(page)
-                for sel in [
-                    "#search", "#HeaderSEARCH", "#tpl0_search",
-                    '[id*="search" i][id*="header" i]',
-                    '[id*="SEARCH"]',
-                    'span.headerButton:text-is("Search")',
-                    '.headerButton:has-text("Search")',
-                    'a:has-text("Search")',
-                    'li:has-text("Search")',
-                    'span:text-is("Search")',
-                    ':text("Search")',
-                ]:
-                    try:
-                        btn = await tf2.wait_for_selector(sel, state="visible", timeout=3_000)
-                        if btn:
-                            await btn.click()
-                            print(f"  [✓] Search tab clicked via: {sel}")
-                            return True
-                    except Exception:
-                        pass
-                return False
-
-            # Strategy 1: form already on screen
-            if await _search_form_visible(4_000):
-                search_form_visible = True
-                print("  [→] Search form already visible.")
-
-            # Strategy 2: click apps icon → Search tab → check form
-            if not search_form_visible:
-                try:
-                    await _click_apps_then_header(page, "search", "Search")
-                    search_form_visible = await _search_form_visible(8_000)
-                    print(f"  [→] After tab nav: form_visible={search_form_visible}")
-                except Exception as nav_err:
-                    print(f"  [!] Tab navigation failed: {nav_err}")
-
-            # Strategy 3: goto HOME_URL then click Search tab
-            if not search_form_visible:
-                print("  [→] goto HOME_URL then click Search tab …")
-                try:
-                    await page.goto(HOME_URL, wait_until="networkidle", timeout=45_000)
-                    await dismiss_any_modal(page)
-                    await asyncio.sleep(2)   # let Angular finish initializing
-                    # Now click the Search tab to show the search form
-                    await _click_search_tab()
-                    search_form_visible = await _search_form_visible(15_000)
-                    print(f"  [→] After HOME+click: form_visible={search_form_visible}")
-                except Exception as goto_err:
-                    print(f"  [!] HOME_URL strategy failed: {goto_err}")
-
-            # Strategy 4: click apps icon again (sometimes needs two goes)
-            if not search_form_visible:
-                print("  [→] Second attempt: apps icon + Search tab …")
-                try:
-                    await _click_apps_then_header(page, "search", "Search")
-                    search_form_visible = await _search_form_visible(10_000)
-                    print(f"  [→] After second nav: form_visible={search_form_visible}")
-                except Exception as nav2_err:
-                    print(f"  [!] Second nav failed: {nav2_err}")
-
-            if not search_form_visible:
+            # ── navigate to search form (pre-positioned after login & each search) ──
+            if not await _go_to_search(page):
                 raise HTTPException(503, "Search form unreachable. Call POST /logout then POST /login, then retry.")
 
-            # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
 
             # ── fill form & search ────────────────────────────────────────────
@@ -340,7 +315,7 @@ async def search_flight(req: FlightRequest):
                 if f.stem.startswith(f"AH{flight_num}_{dep_port}_{date_str.replace('-','')}")
             ]
 
-            return FlightResponse(
+            result = FlightResponse(
                 flight        = f"AH{flight_num}",
                 dep_port      = dep_port,
                 date          = date_str,
@@ -350,13 +325,20 @@ async def search_flight(req: FlightRequest):
                 files         = sorted(files),
             )
 
+            # ── pre-position back at search form for the NEXT request ──────────
+            try:
+                await _go_to_search(page)
+            except Exception:
+                pass   # non-fatal – next request will handle it
+
+            return result
+
         except HTTPException:
             raise   # pass 404 / 503 through unchanged
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
             print(f"SEARCH ERROR:\n{tb}")
-            # Return the real error so we can diagnose remotely
             raise HTTPException(500, detail=f"{type(exc).__name__}: {exc}\n\n{tb}")
 
 
