@@ -82,14 +82,25 @@ _state: dict = {
 SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
 
 
+async def _session_expired(page) -> bool:
+    """Return True if the page is showing the Amadeus login form."""
+    try:
+        url = page.url
+        if "LoginService" in url or "login" in url.lower():
+            return True
+        el = await page.query_selector("#userAliasInput, #passwordInput")
+        return el is not None
+    except Exception:
+        return False
+
+
 async def _go_to_search(page) -> bool:
     """
     Navigate the browser to the flight-search form.
-    Tries up to 3 methods; returns True if the form becomes visible.
-    Call this after login AND after each completed search so the browser
-    is always pre-positioned at the search form.
+    Always clicks apps→Search so Angular loads a fresh empty form.
+    Auto-relogs in if the session has expired.
     """
-    async def _form_visible(ms=3_000):
+    async def _form_visible(ms=5_000):
         try:
             tf = await _app_frame(page)
             await tf.wait_for_selector(SEARCH_INPUT, state="visible", timeout=ms)
@@ -97,41 +108,59 @@ async def _go_to_search(page) -> bool:
         except Exception:
             return False
 
-    # Always navigate via apps→Search tab so Angular loads a FRESH empty form.
-    # Skipping this (fast path) causes Angular to keep stale results from the
-    # previous search, making the next search return 404.
     await _wait_splash_gone(page)
     await dismiss_any_modal(page)
+
+    # Method A: apps icon → Search tab
     try:
         await _click_apps_then_header(page, "search", "Search")
         if await _form_visible(5_000):
-            print("  [✓] _go_to_search: fresh search form via apps+tab.")
+            print("  [✓] _go_to_search: form ready via apps+tab.")
             return True
     except Exception as e:
-        print(f"  [!] _go_to_search method A failed: {e}")
+        print(f"  [!] _go_to_search method A: {e}")
 
-    # Fallback: goto HOME_URL then click Search tab
+    # Method B: goto HOME_URL then click Search tab
     try:
-        print("  [→] _go_to_search: falling back to HOME_URL …")
+        print("  [→] _go_to_search: HOME_URL fallback …")
         await page.goto(HOME_URL, wait_until="load", timeout=30_000)
         await _wait_splash_gone(page)
         await dismiss_any_modal(page)
         await _click_apps_then_header(page, "search", "Search")
         if await _form_visible(6_000):
-            print("  [✓] _go_to_search: form visible after HOME_URL + tab.")
+            print("  [✓] _go_to_search: form ready after HOME_URL + tab.")
             return True
     except Exception as e:
-        print(f"  [!] _go_to_search method B failed: {e}")
+        print(f"  [!] _go_to_search method B: {e}")
+
+    # Method C: session expired → re-login automatically
+    print("  [→] _go_to_search: session may have expired – re-logging in …")
+    try:
+        _state["logged_in"] = False
+        await _ensure_session()          # re-login with the current page
+        _state["logged_in"] = True
+        if await _form_visible(8_000):
+            print("  [✓] _go_to_search: form ready after re-login.")
+            return True
+    except Exception as e:
+        print(f"  [!] _go_to_search re-login failed: {e}")
 
     print("  [!] _go_to_search: all methods failed.")
     return False
 
 
 async def _ensure_session() -> None:
-    """Launch browser and login if not already done."""
-    if _state["logged_in"] and _state["page"]:
+    """Launch browser (if needed) and login."""
+    # If page already exists, reuse it (session expired – just re-login on same page)
+    if _state["page"]:
+        page = _state["page"]
+        await do_login(page)
+        await handle_contact_details(page)
+        await dismiss_any_modal(page)
+        _state["logged_in"] = True
         return
 
+    # First time: launch a fresh browser
     pw = await async_playwright().start()
     browser = await pw.chromium.launch(
         headless=True,
@@ -151,8 +180,6 @@ async def _ensure_session() -> None:
     await do_login(page)
     await handle_contact_details(page)
     await dismiss_any_modal(page)
-    # Pre-position at search form so the first /search call finds it immediately
-    await _go_to_search(page)
 
     _state["playwright"] = pw
     _state["browser"]    = browser
