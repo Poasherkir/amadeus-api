@@ -244,40 +244,70 @@ async def search_flight(req: FlightRequest):
                 except Exception:
                     return False
 
-            # Strategy 1: maybe the form is already on screen (e.g. first call)
+            # Helper: try every known selector for the Search tab/button
+            async def _click_search_tab() -> bool:
+                tf2 = await _app_frame(page)
+                for sel in [
+                    "#search", "#HeaderSEARCH", "#tpl0_search",
+                    '[id*="search" i][id*="header" i]',
+                    '[id*="SEARCH"]',
+                    'span.headerButton:text-is("Search")',
+                    '.headerButton:has-text("Search")',
+                    'a:has-text("Search")',
+                    'li:has-text("Search")',
+                    'span:text-is("Search")',
+                    ':text("Search")',
+                ]:
+                    try:
+                        btn = await tf2.wait_for_selector(sel, state="visible", timeout=3_000)
+                        if btn:
+                            await btn.click()
+                            print(f"  [✓] Search tab clicked via: {sel}")
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+            # Strategy 1: form already on screen
             if await _search_form_visible(4_000):
                 search_form_visible = True
-                print("  [→] Search form already visible – no navigation needed.")
+                print("  [→] Search form already visible.")
 
-            # Strategy 2: click apps icon → Search tab
+            # Strategy 2: click apps icon → Search tab → check form
             if not search_form_visible:
                 try:
                     await _click_apps_then_header(page, "search", "Search")
                     search_form_visible = await _search_form_visible(8_000)
-                    if search_form_visible:
-                        print("  [✓] Search form visible after tab navigation.")
-                    else:
-                        print("  [!] Tab navigation ran but form still not visible.")
+                    print(f"  [→] After tab nav: form_visible={search_form_visible}")
                 except Exception as nav_err:
                     print(f"  [!] Tab navigation failed: {nav_err}")
 
-            # Strategy 3: navigate directly to HOME_URL (cookies keep the session)
+            # Strategy 3: goto HOME_URL then click Search tab
             if not search_form_visible:
-                print("  [→] Navigating to HOME_URL to reset to search view …")
+                print("  [→] goto HOME_URL then click Search tab …")
                 try:
                     await page.goto(HOME_URL, wait_until="networkidle", timeout=45_000)
                     await dismiss_any_modal(page)
-                    search_form_visible = await _search_form_visible(20_000)
-                    if search_form_visible:
-                        print("  [✓] Search form visible after HOME_URL navigation.")
-                    else:
-                        print("  [!] Search form still not visible after HOME_URL nav.")
+                    await asyncio.sleep(2)   # let Angular finish initializing
+                    # Now click the Search tab to show the search form
+                    await _click_search_tab()
+                    search_form_visible = await _search_form_visible(15_000)
+                    print(f"  [→] After HOME+click: form_visible={search_form_visible}")
                 except Exception as goto_err:
-                    print(f"  [!] HOME_URL navigation failed: {goto_err}")
+                    print(f"  [!] HOME_URL strategy failed: {goto_err}")
+
+            # Strategy 4: click apps icon again (sometimes needs two goes)
+            if not search_form_visible:
+                print("  [→] Second attempt: apps icon + Search tab …")
+                try:
+                    await _click_apps_then_header(page, "search", "Search")
+                    search_form_visible = await _search_form_visible(10_000)
+                    print(f"  [→] After second nav: form_visible={search_form_visible}")
+                except Exception as nav2_err:
+                    print(f"  [!] Second nav failed: {nav2_err}")
 
             if not search_form_visible:
-                # Don't re-login inline (too slow) – tell client to call /logout + /login
-                raise HTTPException(503, "Search form unreachable – call POST /logout then POST /login, then retry.")
+                raise HTTPException(503, "Search form unreachable. Call POST /logout then POST /login, then retry.")
 
             # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
