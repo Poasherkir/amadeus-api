@@ -210,15 +210,9 @@ async def search_flight(req: FlightRequest):
 
     Saved files are also written to the reports folder on the server.
     """
-    # Wait up to 120 s for background login to finish before giving up
-    for _wait in range(24):
-        if _state["logged_in"] and _state["page"]:
-            break
-        if _wait == 0:
-            print("  [→] Waiting for background login to complete …")
-        await asyncio.sleep(5)
-    else:
-        raise HTTPException(503, "Browser session not ready – login still in progress, retry in 30 s")
+    # Fail fast if login hasn't completed yet (avoids Railway HTTP timeout)
+    if not (_state["logged_in"] and _state["page"]):
+        raise HTTPException(503, "Still logging in – server starts in ~90 s after deploy. Retry in 30 s.")
 
     async with _state["lock"]:   # one search at a time
         page = _state["page"]
@@ -271,9 +265,9 @@ async def search_flight(req: FlightRequest):
             if not search_form_visible:
                 print("  [→] Navigating to HOME_URL to reset to search view …")
                 try:
-                    await page.goto(HOME_URL, wait_until="networkidle", timeout=60_000)
+                    await page.goto(HOME_URL, wait_until="networkidle", timeout=45_000)
                     await dismiss_any_modal(page)
-                    search_form_visible = await _search_form_visible(25_000)
+                    search_form_visible = await _search_form_visible(20_000)
                     if search_form_visible:
                         print("  [✓] Search form visible after HOME_URL navigation.")
                     else:
@@ -281,22 +275,9 @@ async def search_flight(req: FlightRequest):
                 except Exception as goto_err:
                     print(f"  [!] HOME_URL navigation failed: {goto_err}")
 
-            # Strategy 4: session may have expired → re-login and try again
             if not search_form_visible:
-                print("  [→] All strategies failed – re-logging in …")
-                try:
-                    await _close_session()
-                    await _ensure_session()
-                    page = _state["page"]
-                    await dismiss_any_modal(page)
-                    search_form_visible = await _search_form_visible(30_000)
-                    if search_form_visible:
-                        print("  [✓] Search form visible after re-login.")
-                except Exception as relogin_err:
-                    print(f"  [!] Re-login failed: {relogin_err}")
-
-            if not search_form_visible:
-                raise HTTPException(503, "Search form could not be reached after re-login. Try again in 30 s.")
+                # Don't re-login inline (too slow) – tell client to call /logout + /login
+                raise HTTPException(503, "Search form unreachable – call POST /logout then POST /login, then retry.")
 
             # ── dismiss again in case navigation triggered a new modal ────────
             await dismiss_any_modal(page)
