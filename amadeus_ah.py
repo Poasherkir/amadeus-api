@@ -374,26 +374,52 @@ async def do_search(page: Page, flight_num: str, dep_port: str, date_str: str) -
         await fn_el.click()
     await asyncio.sleep(0.8)   # let Angular validate & enable Search button
 
-    # ── 5. Verify field values ─────────────────────────────────────────────────
+    # ── 5. Verify ALL field values; re-force any that got cleared ────────────────
+    _FORCE_JS = """([id, val]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const nativeSet = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value').set;
+        nativeSet.call(el, val);
+        ['input','change','keydown','keyup','blur'].forEach(t =>
+            el.dispatchEvent(new Event(t, {bubbles:true}))
+        );
+    }"""
+
     fn_val  = await tf.evaluate("() => document.getElementById('tpl0_SEARCH_searchForm_flightNum_input')?.value || ''")
     dep_val = await tf.evaluate("() => document.getElementById('tpl0_SEARCH_searchForm_departurePort_input')?.value || ''")
-    _info(f"Fields before search — Flight:{fn_val}  Dep:{dep_val}")
+    # Try to read date field (any of the known IDs)
+    date_val = await tf.evaluate("""() => {
+        const ids = ['tpl0_SEARCH_searchForm_flightDate_input',
+                     'tpl0_SEARCH_searchForm_date_input',
+                     'tpl0_SEARCH_searchForm_departureDate_input',
+                     'tpl0_SEARCH_searchForm_schedDate_input'];
+        for (const id of ids) {
+            const el = document.getElementById(id);
+            if (el && el.value) return el.value;
+        }
+        return '';
+    }""")
+    _info(f"Fields before search — Flight:'{fn_val}'  Dep:'{dep_val}'  Date:'{date_val}'")
 
-    # If departure port got cleared, force it in via native setter
+    if fn_val.strip() != flight_num.strip():
+        _warn(f"Flight field wrong ('{fn_val}') – re-forcing …")
+        await tf.evaluate(_FORCE_JS, ["tpl0_SEARCH_searchForm_flightNum_input", flight_num])
+        await asyncio.sleep(0.3)
+
     if dep_val.upper() != dep_port.upper():
-        _warn(f"Dep port cleared (shows '{dep_val}') – forcing via native setter …")
-        await tf.evaluate(
-            """([id, val]) => {
-                const el = document.getElementById(id);
-                const nativeSet = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value').set;
-                nativeSet.call(el, val);
-                el.dispatchEvent(new Event('input',  {bubbles:true}));
-                el.dispatchEvent(new Event('change', {bubbles:true}));
-            }""",
-            ["tpl0_SEARCH_searchForm_departurePort_input", dep_port],
-        )
-        await asyncio.sleep(0.5)
+        _warn(f"Dep port wrong ('{dep_val}') – re-forcing …")
+        await tf.evaluate(_FORCE_JS, ["tpl0_SEARCH_searchForm_departurePort_input", dep_port])
+        await asyncio.sleep(0.3)
+
+    if date_val and date_val.upper() != date_str.upper():
+        _warn(f"Date wrong ('{date_val}') – re-forcing to '{date_str}' …")
+        for date_id in ["tpl0_SEARCH_searchForm_flightDate_input",
+                        "tpl0_SEARCH_searchForm_date_input",
+                        "tpl0_SEARCH_searchForm_departureDate_input",
+                        "tpl0_SEARCH_searchForm_schedDate_input"]:
+            await tf.evaluate(_FORCE_JS, [date_id, date_str])
+        await asyncio.sleep(0.3)
 
     _info(f"Searching AH{flight_num} / dep:{dep_port} / {date_str} …")
 
@@ -416,14 +442,31 @@ async def select_flight_row(page: Page, flight_num: str, dep_port: str) -> bool:
     _info("Waiting for search results …")
     tf = await _app_frame(page)
 
-    # Wait for either a result row or the "no flights" message
-    try:
-        await tf.wait_for_selector(
-            '#flightsearch_result0, :text("No flights matching")',
-            timeout=30_000,
-        )
-    except PWTimeout:
-        _warn("Timeout waiting for results.")
+    # Wait for either a result row or the "no flights" message (retry once)
+    found_results = False
+    for attempt in range(2):
+        try:
+            await tf.wait_for_selector(
+                '#flightsearch_result0, :text("No flights matching")',
+                timeout=35_000,
+            )
+            found_results = True
+            break
+        except PWTimeout:
+            if attempt == 0:
+                _warn("Timeout waiting for results – retrying search click …")
+                # Re-click the Search button in case it wasn't submitted properly
+                try:
+                    s_btn = await tf.query_selector('span:text-is("Search")')
+                    if s_btn:
+                        await s_btn.click(force=True)
+                        await page.wait_for_load_state("networkidle", timeout=30_000)
+                except Exception:
+                    pass
+            else:
+                _warn("Timeout waiting for results (both attempts).")
+
+    if not found_results:
         return False
 
     await asyncio.sleep(0.5)
