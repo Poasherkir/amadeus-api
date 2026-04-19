@@ -178,6 +178,107 @@ async def handle_contact_details(page: Page) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Modal / overlay dismissal – generic helper
+# ──────────────────────────────────────────────────────────────────────────────
+async def dismiss_any_modal(page: Page) -> None:
+    """
+    Dismiss any blocking Angular Bootstrap modal (ngb-modal-window) or
+    generic overlay that might intercept pointer events.
+
+    Strategy (in order):
+      1. Click any visible Done / Close / OK / Cancel button inside a modal
+      2. Press Escape
+      3. Click the modal backdrop
+      4. Force-remove the modal from the DOM via JS
+    """
+    _info("Checking for blocking modals …")
+
+    MODAL_BTN_SEL = (
+        'ngb-modal-window button:has-text("Done"), '
+        'ngb-modal-window button:has-text("Close"), '
+        'ngb-modal-window button:has-text("OK"), '
+        'ngb-modal-window button:has-text("Cancel"), '
+        'ngb-modal-window button[aria-label="Close"], '
+        'ngb-modal-window .btn-primary, '
+        'ngb-modal-window .btn-secondary, '
+        '.modal button:has-text("Done"), '
+        '.modal button:has-text("Close"), '
+        '.modal button:has-text("OK"), '
+        '.modal-footer button'
+    )
+
+    dismissed = False
+
+    # Check both main page and iframe
+    for ctx in [page, await _app_frame(page)]:
+        # 1. Try clicking a button inside the modal
+        try:
+            btn = await ctx.query_selector(MODAL_BTN_SEL)
+            if btn:
+                _info("Modal button found – clicking …")
+                try:
+                    await btn.click(timeout=5_000)
+                except Exception:
+                    await btn.click(force=True, timeout=5_000)
+                await asyncio.sleep(1.0)
+                dismissed = True
+                _ok("Modal dismissed via button click.")
+                break
+        except Exception:
+            pass
+
+        # 2. Check if a modal exists at all
+        try:
+            modal = await ctx.query_selector("ngb-modal-window, .modal.show, .modal.d-block")
+            if not modal:
+                continue
+        except Exception:
+            continue
+
+        _warn("Modal detected but no button found – trying Escape …")
+        # 3. Escape key
+        try:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.8)
+        except Exception:
+            pass
+
+        # 4. Click backdrop
+        try:
+            backdrop = await ctx.query_selector("ngb-modal-backdrop, .modal-backdrop")
+            if backdrop:
+                await backdrop.click(force=True)
+                await asyncio.sleep(0.8)
+        except Exception:
+            pass
+
+        # 5. Force-remove via JS
+        try:
+            removed = await ctx.evaluate("""() => {
+                let count = 0;
+                for (const sel of ['ngb-modal-window', 'ngb-modal-backdrop',
+                                   '.modal.show', '.modal-backdrop']) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        el.remove(); count++;
+                    });
+                }
+                // Also remove the 'modal-open' class from body which locks scrolling
+                document.body.classList.remove('modal-open');
+                document.body.style.removeProperty('overflow');
+                document.body.style.removeProperty('padding-right');
+                return count;
+            }""")
+            if removed:
+                _ok(f"Force-removed {removed} modal element(s) via JS.")
+                dismissed = True
+        except Exception as e:
+            _warn(f"JS modal removal failed: {e}")
+
+    if not dismissed:
+        _info("No blocking modal detected.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Step 4 – Fill search form and submit
 # ──────────────────────────────────────────────────────────────────────────────
 async def _set_field(tf, field_id: str, value: str) -> None:

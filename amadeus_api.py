@@ -53,6 +53,7 @@ from amadeus_ah import (
     _save_text,
     _today,
     _MONTHS,
+    dismiss_any_modal,
     do_login,
     do_search,
     extract_passenger_data,
@@ -99,6 +100,7 @@ async def _ensure_session() -> None:
 
     await do_login(page)
     await handle_contact_details(page)
+    await dismiss_any_modal(page)   # clear any leftover overlay before first search
 
     _state["playwright"] = pw
     _state["browser"]    = browser
@@ -202,11 +204,17 @@ async def search_flight(req: FlightRequest):
         dep_port   = req.dep_port.strip().upper()
         date_str   = _resolve_date(req.date)
 
+        # ── dismiss any blocking modal before touching the UI ─────────────
+        await dismiss_any_modal(page)
+
         # ── navigate back to search ────────────────────────────────────────
         try:
             await _click_apps_then_header(page, "search", "Search")
         except Exception:
             pass
+
+        # ── dismiss again in case navigation triggered a new modal ─────────
+        await dismiss_any_modal(page)
 
         # ── fill form & search ─────────────────────────────────────────────
         await do_search(page, flight_num, dep_port, date_str)
