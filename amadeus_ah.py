@@ -598,6 +598,20 @@ async def _find_refresh_btn(tf):
 
 async def open_passenger_view(page: Page) -> None:
     await _click_apps_then_header(page, "HeaderPASSENGER", "Passenger")
+    # Wait for a passenger-view specific element so we know we're actually there
+    tf = await _app_frame(page)
+    for pax_sel in [
+        '#passengerView', '#paxView', '[id*="passenger" i]',
+        ':text("PAX")', ':text("Passengers")', ':text("PASSENGERS")',
+        '[class*="passenger" i]',
+    ]:
+        try:
+            await tf.wait_for_selector(pax_sel, state="visible", timeout=5_000)
+            _info(f"Passenger view confirmed via: {pax_sel}")
+            break
+        except Exception:
+            pass
+    await asyncio.sleep(1.0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -821,6 +835,26 @@ async def extract_passenger_data(
 
     # Structured text that mirrors the visual layout of the page
     text = await _page_structured_text(page)
+
+    # ── Strip login-page text if it leaked in as an overlay ──────────────────
+    # This happens when the app frame wasn't found and the main page (login)
+    # was captured instead.  Detect by well-known login-page phrases.
+    _LOGIN_MARKERS = (
+        "Please enter your details to log in",
+        "Login + Organization",
+        "Forgot your password",
+        "Amadeus Copyright 1999",
+    )
+    if any(m in text for m in _LOGIN_MARKERS):
+        _warn("Login page text detected in passenger output – stripping …")
+        # Keep only lines that come AFTER the last login-page marker
+        lines = text.splitlines()
+        last_login_line = -1
+        for i, line in enumerate(lines):
+            if any(m in line for m in _LOGIN_MARKERS):
+                last_login_line = i
+        if last_login_line >= 0:
+            text = "\n".join(lines[last_login_line + 1:]).strip()
 
     # Print to terminal
     for line in text.splitlines():
