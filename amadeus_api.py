@@ -125,7 +125,12 @@ async def _close_session() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["lock"] = asyncio.Lock()
-    await _ensure_session()
+    try:
+        await _ensure_session()
+    except Exception as exc:
+        import traceback
+        print(f"STARTUP ERROR – browser/login failed:\n{traceback.format_exc()}")
+        # Server still starts; /search will return 503 until /login is called
     yield
     await _close_session()
 
@@ -204,55 +209,65 @@ async def search_flight(req: FlightRequest):
         dep_port   = req.dep_port.strip().upper()
         date_str   = _resolve_date(req.date)
 
-        # ── dismiss any blocking modal before touching the UI ─────────────
-        await dismiss_any_modal(page)
-
-        # ── navigate back to search ────────────────────────────────────────
         try:
-            await _click_apps_then_header(page, "search", "Search")
-        except Exception:
-            pass
+            # ── dismiss any blocking modal before touching the UI ─────────────
+            await dismiss_any_modal(page)
 
-        # ── dismiss again in case navigation triggered a new modal ─────────
-        await dismiss_any_modal(page)
+            # ── navigate back to search ───────────────────────────────────────
+            try:
+                await _click_apps_then_header(page, "search", "Search")
+            except Exception as nav_err:
+                print(f"  [!] Nav to search failed (non-fatal): {nav_err}")
 
-        # ── fill form & search ─────────────────────────────────────────────
-        await do_search(page, flight_num, dep_port, date_str)
+            # ── dismiss again in case navigation triggered a new modal ────────
+            await dismiss_any_modal(page)
 
-        # ── click result row ───────────────────────────────────────────────
-        found = await select_flight_row(page, flight_num, dep_port)
-        if not found:
-            raise HTTPException(404, f"No flight AH{flight_num}/{dep_port}/{date_str} found")
+            # ── fill form & search ────────────────────────────────────────────
+            await do_search(page, flight_num, dep_port, date_str)
 
-        # ── check if closed (Final Loadsheet present?) ─────────────────────
-        is_closed = await get_final_loadsheet(page, flight_num, dep_port, date_str)
+            # ── click result row ──────────────────────────────────────────────
+            found = await select_flight_row(page, flight_num, dep_port)
+            if not found:
+                raise HTTPException(404, f"No flight AH{flight_num}/{dep_port}/{date_str} found")
 
-        loadsheet_txt = None
-        if is_closed:
-            ls_path = _report_path(flight_num, dep_port, date_str, "loadsheet", "txt")
-            if ls_path.exists():
-                loadsheet_txt = ls_path.read_text(encoding="utf-8")
+            # ── check if closed (Final Loadsheet present?) ────────────────────
+            is_closed = await get_final_loadsheet(page, flight_num, dep_port, date_str)
 
-        # ── passenger data ─────────────────────────────────────────────────
-        await open_passenger_view(page)
-        pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
+            loadsheet_txt = None
+            if is_closed:
+                ls_path = _report_path(flight_num, dep_port, date_str, "loadsheet", "txt")
+                if ls_path.exists():
+                    loadsheet_txt = ls_path.read_text(encoding="utf-8")
 
-        # ── collect saved file names ───────────────────────────────────────
-        _ensure_output_dir()
-        files = [
-            f.name for f in OUTPUT_DIR.iterdir()
-            if f.stem.startswith(f"AH{flight_num}_{dep_port}_{date_str.replace('-','')}")
-        ]
+            # ── passenger data ────────────────────────────────────────────────
+            await open_passenger_view(page)
+            pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
 
-        return FlightResponse(
-            flight        = f"AH{flight_num}",
-            dep_port      = dep_port,
-            date          = date_str,
-            closed        = is_closed,
-            passenger_txt = pax_text,
-            loadsheet_txt = loadsheet_txt,
-            files         = sorted(files),
-        )
+            # ── collect saved file names ──────────────────────────────────────
+            _ensure_output_dir()
+            files = [
+                f.name for f in OUTPUT_DIR.iterdir()
+                if f.stem.startswith(f"AH{flight_num}_{dep_port}_{date_str.replace('-','')}")
+            ]
+
+            return FlightResponse(
+                flight        = f"AH{flight_num}",
+                dep_port      = dep_port,
+                date          = date_str,
+                closed        = is_closed,
+                passenger_txt = pax_text,
+                loadsheet_txt = loadsheet_txt,
+                files         = sorted(files),
+            )
+
+        except HTTPException:
+            raise   # pass 404 / 503 through unchanged
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"SEARCH ERROR:\n{tb}")
+            # Return the real error so we can diagnose remotely
+            raise HTTPException(500, detail=f"{type(exc).__name__}: {exc}\n\n{tb}")
 
 
 @app.get("/reports", summary="List saved report files")
