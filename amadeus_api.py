@@ -9,24 +9,26 @@ Start:
     python amadeus_api.py
 
 Endpoints:
-    GET  /             – health check
-    POST /search       – search a flight and return all data
-    GET  /reports      – list saved report files
-    GET  /reports/{fn} – download a saved report file
-    POST /login        – open browser session and login
-    POST /logout       – close browser session
+    GET  /              – health check
+    POST /search        – start a flight search, returns job_id immediately
+    GET  /result/{id}   – poll for search result
+    GET  /reports       – list saved report files
+    GET  /reports/{fn}  – download a saved report file
+    POST /login         – open browser session and login
+    POST /logout        – close browser session
 """
 
 import asyncio
 import os
 import socket
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 _IS_RAILWAY = os.environ.get("RAILWAY_ENVIRONMENT") is not None
@@ -67,6 +69,9 @@ _state: dict = {
     "logged_in":  False,
     "lock":       None,
 }
+
+# job_id -> {"status": "pending"|"done"|"error", "result": ..., "detail": ...}
+_jobs: dict = {}
 
 SEARCH_INPUT = "#tpl0_SEARCH_searchForm_flightNum_input"
 
@@ -231,46 +236,26 @@ def _resolve_date(raw: str) -> str:
     return raw
 
 
-@app.get("/", summary="Server status")
-async def root():
-    local_ip = socket.gethostbyname(socket.gethostname())
-    return {
-        "status":    "running",
-        "logged_in": _state["logged_in"],
-        "server":    f"http://{local_ip}:8000",
-        "today":     _today(),
-    }
-
-
-@app.post("/search", response_model=FlightResponse, summary="Search a flight")
-async def search_flight(req: FlightRequest):
-    """
-    Search for a flight and extract all available data.
-    Returns loadsheet + passengers if the flight is closed, or passenger data only if still open.
-    """
-    if not (_state["logged_in"] and _state["page"]):
-        raise HTTPException(503, "Still logging in – server starts in ~90 s after deploy. Retry in 30 s.")
-
+async def _run_search(job_id: str, flight_num: str, dep_port: str, date_str: str) -> None:
+    """Run the full search in the background and store result in _jobs."""
     async with _state["lock"]:
         page = _state["page"]
         if not page:
-            raise HTTPException(503, "Browser session not ready")
-
-        flight_num = req.flight_num.strip()
-        dep_port   = req.dep_port.strip().upper()
-        date_str   = _resolve_date(req.date)
+            _jobs[job_id] = {"status": "error", "detail": "Browser session not ready"}
+            return
 
         try:
             if not await _go_to_search(page):
-                raise HTTPException(503, "Search form unreachable. Call POST /logout then POST /login, then retry.")
+                _jobs[job_id] = {"status": "error", "detail": "Search form unreachable. Try POST /logout then POST /login."}
+                return
 
             await dismiss_any_modal(page)
-
             await do_search(page, flight_num, dep_port, date_str)
 
             found = await select_flight_row(page, flight_num, dep_port)
             if not found:
-                raise HTTPException(404, f"No flight AH{flight_num}/{dep_port}/{date_str} found")
+                _jobs[job_id] = {"status": "error", "detail": f"No flight AH{flight_num}/{dep_port}/{date_str} found", "code": 404}
+                return
 
             await open_passenger_view(page)
             pax_text = await extract_passenger_data(page, flight_num, dep_port, date_str)
@@ -284,35 +269,80 @@ async def search_flight(req: FlightRequest):
                     loadsheet_txt = ls_path.read_text(encoding="utf-8")
 
             _ensure_output_dir()
-            files = [
+            files = sorted(
                 f.name for f in OUTPUT_DIR.iterdir()
                 if f.stem.startswith(f"AH{flight_num}_{dep_port}_{date_str.replace('-','')}")
-            ]
-
-            result = FlightResponse(
-                flight        = f"AH{flight_num}",
-                dep_port      = dep_port,
-                date          = date_str,
-                closed        = is_closed,
-                passenger_txt = pax_text,
-                loadsheet_txt = loadsheet_txt,
-                files         = sorted(files),
             )
+
+            _jobs[job_id] = {
+                "status": "done",
+                "result": FlightResponse(
+                    flight        = f"AH{flight_num}",
+                    dep_port      = dep_port,
+                    date          = date_str,
+                    closed        = is_closed,
+                    passenger_txt = pax_text,
+                    loadsheet_txt = loadsheet_txt,
+                    files         = files,
+                ).model_dump(),
+            }
 
             try:
                 await _go_to_search(page)
             except Exception:
                 pass
 
-            return result
-
-        except HTTPException:
-            raise
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
             print(f"SEARCH ERROR:\n{tb}")
-            raise HTTPException(500, detail=f"{type(exc).__name__}: {exc}\n\n{tb}")
+            _jobs[job_id] = {"status": "error", "detail": f"{type(exc).__name__}: {exc}"}
+
+
+@app.get("/", summary="Server status")
+async def root():
+    local_ip = socket.gethostbyname(socket.gethostname())
+    return {
+        "status":    "running",
+        "logged_in": _state["logged_in"],
+        "server":    f"http://{local_ip}:8000",
+        "today":     _today(),
+    }
+
+
+@app.post("/search", summary="Start a flight search (returns immediately)")
+async def search_flight(req: FlightRequest):
+    """
+    Starts the search in the background and returns a job_id straight away.
+    Poll GET /result/{job_id} every few seconds until status is 'done' or 'error'.
+    """
+    if not (_state["logged_in"] and _state["page"]):
+        raise HTTPException(503, "Still logging in – retry in 30 s.")
+
+    flight_num = req.flight_num.strip()
+    dep_port   = req.dep_port.strip().upper()
+    date_str   = _resolve_date(req.date)
+
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "pending"}
+
+    asyncio.create_task(_run_search(job_id, flight_num, dep_port, date_str))
+
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/result/{job_id}", summary="Poll for search result")
+async def get_result(job_id: str):
+    """
+    Returns the search result once ready.
+    - status 'pending' → still running, check again in a few seconds
+    - status 'done'    → result is in the 'result' field
+    - status 'error'   → something went wrong, check 'detail'
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, f"Job '{job_id}' not found")
+    return job
 
 
 @app.get("/reports", summary="List saved report files")
