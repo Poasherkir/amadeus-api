@@ -233,8 +233,6 @@ app = FastAPI(
     description="Air Algérie Ground Operations – flight search & loadsheet extraction",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None,
-    redoc_url=None,
 )
 
 
