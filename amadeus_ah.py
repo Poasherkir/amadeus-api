@@ -21,9 +21,9 @@ LOGIN_URL = (
     "&nonce=1345561146#/login"
 )
 HOME_URL     = "https://afmgui.si.amadeus.net/1ASIHDFAH/fm/home/RampMobile"
-USERNAME     = "MBOUDINE"
-ORGANIZATION = "AH"
-PASSWORD     = "PROMOTION2026@"
+USERNAME     = os.environ.get("AMADEUS_USERNAME", "")
+ORGANIZATION = os.environ.get("AMADEUS_ORG", "AH")
+PASSWORD     = os.environ.get("AMADEUS_PASSWORD", "")
 CARRIER      = "AH"
 
 _MONTHS = {
@@ -60,16 +60,20 @@ async def _app_frame(page: Page):
     return page
 
 
-async def do_login(page: Page) -> None:
+async def do_login(page: Page, username: str = None, organization: str = None, password: str = None) -> None:
+    _username     = username     or USERNAME
+    _organization = organization or ORGANIZATION
+    _password     = password     or PASSWORD
+
     _info("Navigating to login page …")
     await page.goto(LOGIN_URL, wait_until="load", timeout=90_000)
     await page.wait_for_selector("#userAliasInput", timeout=30_000)
 
-    await page.fill("#userAliasInput", USERNAME)
+    await page.fill("#userAliasInput", _username)
     _info("Username filled")
-    await page.fill("#organizationInput", ORGANIZATION)
+    await page.fill("#organizationInput", _organization)
     _info("Organisation filled")
-    await page.fill("#passwordInput", PASSWORD)
+    await page.fill("#passwordInput", _password)
     _info("Password filled")
 
     for sel in [

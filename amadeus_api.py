@@ -63,11 +63,14 @@ from amadeus_ah import (
 from playwright.async_api import async_playwright
 
 _state: dict = {
-    "playwright": None,
-    "browser":    None,
-    "page":       None,
-    "logged_in":  False,
-    "lock":       None,
+    "playwright":   None,
+    "browser":      None,
+    "page":         None,
+    "logged_in":    False,
+    "lock":         None,
+    "username":     None,
+    "organization": None,
+    "password":     None,
 }
 
 # job_id -> {"status": "pending"|"done"|"error", "result": ..., "detail": ...}
@@ -135,11 +138,15 @@ async def _go_to_search(page) -> bool:
     return False
 
 
-async def _ensure_session() -> None:
-    """Launch browser (if needed) and login."""
+async def _ensure_session(username: str = None, organization: str = None, password: str = None) -> None:
+    """Launch browser (if needed) and login with the provided or stored credentials."""
+    u = username     or _state["username"]
+    o = organization or _state["organization"]
+    p = password     or _state["password"]
+
     if _state["page"]:
         page = _state["page"]
-        await do_login(page)
+        await do_login(page, u, o, p)
         await handle_contact_details(page)
         await dismiss_any_modal(page)
         _state["logged_in"] = True
@@ -161,7 +168,7 @@ async def _ensure_session() -> None:
     page = await ctx.new_page()
     page.set_default_timeout(30_000)
 
-    await do_login(page)
+    await do_login(page, u, o, p)
     await handle_contact_details(page)
     await dismiss_any_modal(page)
 
@@ -183,14 +190,34 @@ async def _close_session() -> None:
 
 
 async def _warmup() -> None:
+    """Launch the browser in the background so it's ready when /login is called."""
     await asyncio.sleep(3)
     async with _state["lock"]:
         try:
-            await _ensure_session()
-            print("  [✓] Background login complete.")
+            if _state["browser"]:
+                return
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = await browser.new_context(
+                viewport={"width": 1366, "height": 768},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            )
+            page = await ctx.new_page()
+            page.set_default_timeout(30_000)
+            _state["playwright"] = pw
+            _state["browser"]    = browser
+            _state["page"]       = page
+            print("  [✓] Browser ready – waiting for POST /login.")
         except Exception:
             import traceback
-            print(f"WARMUP ERROR – browser/login failed:\n{traceback.format_exc()}")
+            print(f"WARMUP ERROR:\n{traceback.format_exc()}")
 
 
 @asynccontextmanager
@@ -209,6 +236,12 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
 )
+
+
+class LoginRequest(BaseModel):
+    username:     str
+    organization: Optional[str] = "AH"
+    password:     str
 
 
 class FlightRequest(BaseModel):
@@ -319,7 +352,7 @@ async def search_flight(req: FlightRequest):
     Poll GET /result/{job_id} every few seconds until status is 'done' or 'error'.
     """
     if not (_state["logged_in"] and _state["page"]):
-        raise HTTPException(503, "Still logging in – retry in 30 s.")
+        raise HTTPException(503, "Not logged in – call POST /login first.")
 
     flight_num = req.flight_num.strip()
     dep_port   = req.dep_port.strip().upper()
@@ -371,13 +404,14 @@ async def logout():
     return {"status": "logged out"}
 
 
-@app.post("/login", summary="Open browser session and login")
-async def login():
+@app.post("/login", summary="Login with your Amadeus credentials")
+async def login(req: LoginRequest):
     async with _state["lock"]:
-        if _state["logged_in"]:
-            return {"status": "already logged in"}
-        await _ensure_session()
-    return {"status": "logged in"}
+        _state["username"]     = req.username.strip()
+        _state["organization"] = req.organization.strip().upper()
+        _state["password"]     = req.password
+        await _ensure_session(req.username.strip(), req.organization.strip().upper(), req.password)
+    return {"status": "logged in", "user": req.username.upper()}
 
 
 if __name__ == "__main__":
